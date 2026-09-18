@@ -12,6 +12,8 @@ import spacy
 import json
 import os
 from tqdm import tqdm
+import matplotlib.pyplot as plt
+import time
 
 
 # ============================================================================
@@ -484,9 +486,9 @@ class BaselineProfile:
     """
     Динамический базовый профиль сотрудника (алгоритм EMA).
     Реализует математическую модель динамического профилирования
-    (формулы 18, 21-22 отчёта НИР2).
+    (формулы 18, 21-22 отчёта НИР2) и сохраняет историю для визуализации.
     """
-    # Список отслеживаемых маркеров риска (согласован с MarkerVector)
+
     TRACKED_MARKERS = [
         "pronoun_marker",
         "syntactic_marker",
@@ -506,32 +508,26 @@ class BaselineProfile:
         warmup_threshold: int = 10,
         role_priors: Optional[Dict[str, Dict[str, float]]] = None
     ):
-        """
-        Инициализация параметров базового профиля.
-        
-        Параметры:
-            alpha_ema: коэффициент скорости сглаживания EMA (alpha в формуле 21-22).
-            min_variance: epsilon для предотвращения деления на 0 при малой вариативности (формула 18).
-            clip_limit: ограничение экстремальных выбросов z-score интервалом [-clip_limit, clip_limit].
-            warmup_threshold: число наблюдений для выхода на полную индивидуальную норму (epsilon -> 1).
-            role_priors: априорные ролевые ожидания {marker: {'mean': val, 'variance': val}}.
-        """
         self.alpha_ema = alpha_ema
         self.min_variance = min_variance
         self.clip_limit = clip_limit
         self.warmup_threshold = warmup_threshold
         self.role_priors = role_priors or {}
+
         self.observations_count: int = 0
         self.means: Dict[str, float] = {}
         self.variances: Dict[str, float] = {}
-        # Инициализация структур профиля нулями или априорными ролевыми значениями
+
+        # История для графиков эволюции профиля и отклонений
+        self.means_history: Dict[str, List[float]] = {m: [] for m in self.TRACKED_MARKERS}
+        self.deviations_history: Dict[str, List[float]] = {m: [] for m in self.TRACKED_MARKERS}
+
         for marker in self.TRACKED_MARKERS:
             prior = self.role_priors.get(marker, {})
             self.means[marker] = float(prior.get("mean", 0.0))
             self.variances[marker] = float(prior.get("variance", 0.0))
 
     def _get_marker_dict(self, markers: MarkerVector) -> Dict[str, float]:
-        """Преобразование MarkerVector в словарь с валидацией числовых значений."""
         data = asdict(markers) if hasattr(markers, "__dataclass_fields__") else dict(markers)
         clean_dict = {}
         for m in self.TRACKED_MARKERS:
@@ -540,73 +536,62 @@ class BaselineProfile:
         return clean_dict
 
     def compute_deviations(self, markers: MarkerVector) -> Dict[str, float]:
-        """
-        Расчёт стандартизированных z-score отклонений текущих маркеров
-        от накопленного профиля (ДО момента обновления состояния).
-        
-        Формула (18) НИР2:
-            z = (m - mu) / sqrt(max(sigma^2, min_variance))
-            
-        Возвращает:
-            Словарь нормализованных z-score по каждому маркеру.
-        """
+        """Расчёт z-score ДО обновления профиля и фиксация в истории."""
         marker_vals = self._get_marker_dict(markers)
         z_scores: Dict[str, float] = {}
-        # Если наблюдений ещё не было и ролевых априоров нет — отклонение нейтральное (0.0)
+
         if self.observations_count == 0 and not self.role_priors:
-            return {m: 0.0 for m in self.TRACKED_MARKERS}
+            neutral = {m: 0.0 for m in self.TRACKED_MARKERS}
+            for m in self.TRACKED_MARKERS:
+                self.deviations_history[m].append(0.0)
+            return neutral
+
         for m in self.TRACKED_MARKERS:
             val = marker_vals[m]
             mean = self.means[m]
             var = self.variances[m]
-            # Защита от нулевой дисперсии (min_variance = epsilon)
+
             safe_var = max(var, self.min_variance)
             std = math.sqrt(safe_var)
-            # Формула (18)
+
             raw_z = (val - mean) / std
-            # Отсечение экстремальных выбросов
-            z_clipped = max(-self.clip_limit, min(self.clip_limit, raw_z))
-            z_scores[m] = float(z_clipped)
+            z_clipped = float(max(-self.clip_limit, min(self.clip_limit, raw_z)))
+            z_scores[m] = z_clipped
+            self.deviations_history[m].append(z_clipped)
+
         return z_scores
 
     def update(self, markers: MarkerVector) -> None:
-        """
-        Инкрементное обновление базового профиля методом EMA.
-        
-        Формулы (21)-(22) НИР2:
-            mu_t = mu_{t-1} + alpha * (x_t - mu_{t-1})
-            sigma^2_t = (1 - alpha) * [ sigma^2_{t-1} + alpha * (x_t - mu_{t-1})^2 ]
-        """
+        """Инкрементное обновление EMA и сохранение значений средних в историю."""
         marker_vals = self._get_marker_dict(markers)
 
-        # Обработка первого наблюдения субъекта (инициализация центроида)
         if self.observations_count == 0 and not self.role_priors:
             for m in self.TRACKED_MARKERS:
                 self.means[m] = marker_vals[m]
                 self.variances[m] = self.min_variance
+                self.means_history[m].append(marker_vals[m])
             self.observations_count = 1
             return
 
-        # Инкрементное обновление параметров
         for m in self.TRACKED_MARKERS:
             val = marker_vals[m]
             prev_mean = self.means[m]
             prev_var = self.variances[m]
+
             diff = val - prev_mean
-            # Формула (21)
             new_mean = prev_mean + self.alpha_ema * diff
-            # Формула (22)
             new_var = (1.0 - self.alpha_ema) * (prev_var + self.alpha_ema * (diff ** 2))
+
             self.means[m] = float(new_mean)
             self.variances[m] = float(new_var)
+            self.means_history[m].append(float(new_mean))
+
         self.observations_count += 1
 
     def get_mean(self, marker_name: str) -> float:
-        """Получение текущего математического ожидания маркера."""
         return self.means.get(marker_name, 0.0)
 
     def get_std(self, marker_name: str) -> float:
-        """Получение текущего среднеквадратичного отклонения маркера."""
         var = self.variances.get(marker_name, self.min_variance)
         return math.sqrt(max(var, self.min_variance))
 
@@ -940,92 +925,203 @@ class StreamProcessor:
                 yield self.process_message(msg)
 
 
+def visualize_baseline_evolution(employees: Dict[str, EmployeeState], top_n: int = 3, output_dir: str = "output"):
+    """
+    Построение графиков сходимости математических ожиданий маркеров риска (EMA)
+    для сотрудников с наибольшим числом сообщений.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Отбор top_n наиболее активных авторов
+    sorted_senders = sorted(
+        employees.keys(), 
+        key=lambda s: employees[s].total_messages_sent, 
+        reverse=True
+    )[:top_n]
+
+    if not sorted_senders or employees[sorted_senders[0]].total_messages_sent < 2:
+        print("[ИНФО] Недостаточно сообщений для построения графиков конвергенции профилей.")
+        return
+
+    marker_cols = [
+        "pronoun_marker", "syntactic_marker", 
+        "activity_marker", "response_marker", "social_marker"
+    ]
+    marker_titles = [
+        "Местоименный маркер (энтропия)", "Синтаксический маркер (сложность)", 
+        "Маркер активности (темп)", "Маркер задержек ответа", "Социально-сетевой маркер"
+    ]
+
+    fig, axes = plt.subplots(5, 1, figsize=(12, 18), sharex=False)
+    fig.suptitle("Конвергенция математических ожиданий базового профиля (EMA)", fontsize=15, fontweight="bold", y=0.99)
+
+    for i, (marker, title) in enumerate(zip(marker_cols, marker_titles)):
+        ax = axes[i]
+        for sender in sorted_senders:
+            y_vals = employees[sender].baseline_profile.means_history[marker]
+            x_vals = range(1, len(y_vals) + 1)
+            ax.plot(x_vals, y_vals, label=f"{sender} ({len(y_vals)} сообщ.)", alpha=0.85, linewidth=2)
+            
+        ax.set_title(title, fontsize=12, pad=8)
+        ax.set_ylabel("Мат. ожидание (μ)", fontsize=11)
+        ax.grid(True, linestyle="--", alpha=0.5)
+        ax.legend(loc="upper right", fontsize=9)
+        if i == 4:
+            ax.set_xlabel("Порядковый номер сообщения сотрудника", fontsize=11)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+    filepath = os.path.join(output_dir, "baseline_evolution.png")
+    plt.savefig(filepath, dpi=300, bbox_inches="tight")
+    plt.close()
+    print(f"[ИНФО] График эволюции базового профиля сохранён в '{filepath}'.")
+
+
+def visualize_deviations(employees: Dict[str, EmployeeState], top_n: int = 3, output_dir: str = "output"):
+    """
+    Построение динамики нормализованных z-score отклонений с пороговыми линиями ±3σ.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    sorted_senders = sorted(
+        employees.keys(), 
+        key=lambda s: employees[s].total_messages_sent, 
+        reverse=True
+    )[:top_n]
+
+    if not sorted_senders or employees[sorted_senders[0]].total_messages_sent < 2:
+        return
+
+    marker_cols = [
+        "pronoun_marker", "syntactic_marker", 
+        "activity_marker", "response_marker", "social_marker"
+    ]
+    marker_titles = [
+        "Отклонения: Местоименный маркер", "Отклонения: Синтаксический маркер", 
+        "Отклонения: Активность", "Отклонения: Задержки ответа", "Отклонения: Социальные связи"
+    ]
+
+    fig, axes = plt.subplots(5, 1, figsize=(12, 18), sharex=False)
+    fig.suptitle("Динамика z-score отклонений от индивидуальной нормы", fontsize=15, fontweight="bold", y=0.99)
+
+    for i, (marker, title) in enumerate(zip(marker_cols, marker_titles)):
+        ax = axes[i]
+        for sender in sorted_senders:
+            y_vals = employees[sender].baseline_profile.deviations_history[marker]
+            x_vals = range(1, len(y_vals) + 1)
+            ax.plot(x_vals, y_vals, label=sender, alpha=0.75, linewidth=1.5)
+
+        # Отрисовка порогов правила трёх сигм (±3σ)
+        ax.axhline(y=3.0, color="r", linestyle="--", alpha=0.6, label="Порог аномалии (+3σ)")
+        ax.axhline(y=-3.0, color="r", linestyle="--", alpha=0.6, label="Порог аномалии (-3σ)")
+
+        ax.set_title(title, fontsize=12, pad=8)
+        ax.set_ylabel("z-score", fontsize=11)
+        ax.grid(True, linestyle="--", alpha=0.4)
+        
+        # Удаление дубликатов в легенде для пороговых линий
+        handles, labels = ax.get_legend_handles_labels()
+        unique = dict(zip(labels, handles))
+        ax.legend(unique.values(), unique.keys(), loc="upper right", fontsize=8)
+        if i == 4:
+            ax.set_xlabel("Порядковый номер сообщения сотрудника", fontsize=11)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+    filepath = os.path.join(output_dir, "deviations_dynamics.png")
+    plt.savefig(filepath, dpi=300, bbox_inches="tight")
+    plt.close()
+    print(f"[ИНФО] График динамики отклонений сохранён в '{filepath}'.")
+
+
 def run_pipeline(
     dataset_path: Optional[str] = None, 
     max_messages: Optional[int] = 1000,
     topology_window_days: int = 30
 ):
-    """
-    Запуск сквозного конвейера потокового риск-скрининга.
-    
-    Параметры:
-        dataset_path: путь к файлу CERT r4.2 (email.csv) или None для демо-режима.
-        max_messages: лимит сообщений для тестового прогона.
-        topology_window_days: протяженность скользящего окна графа связей.
-    """
     print("\n" + "="*70)
     print("  СИСТЕМА ДВУХЭТАПНОГО ВЫЯВЛЕНИЯ ИНСАЙДЕРСКИХ УГРОЗ: ЭТАП 1")
     print("  (Потоковый риск-скрининг и динамическое профилирование)")
     print("="*70)
-    # 1. Инициализация экстрактора признаков и потокового диспетчера
+
     print("\n[ИНФО] Инициализация экстрактора признаков spaCy...")
     extractor = SpacyStatisticalExtractor(model_name="en_core_web_sm")
+    
     print(f"[ИНФО] Запуск StreamProcessor (скользящее окно графа: {topology_window_days} дн.)...")
     processor = StreamProcessor(
         feature_extractor=extractor, 
         topology_window_days=topology_window_days
     )
     parser = MessageParser(min_body_length=5)
-    # 2. Подготовка генератора потока сообщений
+
     if dataset_path and os.path.exists(dataset_path):
         print(f"[ИНФО] Подключение к датасету: '{dataset_path}'")
         stream = parser.stream_cert_emails(dataset_path)
     else:
-        print("[ВНИМАНИЕ] Файл датасета не указан или не найден. Запуск демонстрационного потока...")
-        # Синтетический временной ряд из нескольких сообщений для верификации работы конвейера
+        print("[ВНИМАНИЕ] Файл датасета не найден или не указан. Запуск тестового генератора...")
         base_time = datetime(2026, 1, 15, 9, 0, 0, tzinfo=timezone.utc)
         demo_messages = [
             CommunicationMessage(
                 sender_id="aab0573@dtaa.com",
                 receiver_ids=["cgh0024@dtaa.com"],
-                timestamp=base_time,
-                subject="Status report",
-                body="Hello team. Here is our regular weekly status update on project milestones."
-            ),
-            CommunicationMessage(
-                sender_id="cgh0024@dtaa.com",
-                receiver_ids=["aab0573@dtaa.com"],
-                timestamp=base_time + timedelta(minutes=15),
-                subject="Re: Status report",
-                body="Thanks, acknowledged. Reviewing the metrics now."
-            ),
-            CommunicationMessage(
-                sender_id="aab0573@dtaa.com",
-                receiver_ids=["cgh0024@dtaa.com", "xyz0999@dtaa.com"],
-                timestamp=base_time + timedelta(hours=3),
-                subject="Urgent issue",
-                body="I don't care about these useless procedures anymore! You always block my work. Why do I have to explain myself?"
-            ),
+                timestamp=base_time + timedelta(minutes=i*15),
+                subject=f"Status update {i}",
+                body=f"Regular communication update {i}. All tasks moving as expected." if i < 15 else "I hate this management! Everything is broken and nobody listens to me!"
+            )
+            for i in range(25)
         ]
         stream = iter(demo_messages)
 
-    # 3. Потоковая обработка сообщений
     total_processed = 0
     anomalies_detected = 0
+
     print("\n[ИНФО] Обработка потока событий...")
-    pbar = tqdm(total=max_messages, desc="Скрининг событий", unit="msg")
+    pbar = tqdm(total=max_messages, desc="Скрининг событий", unit="сообщ.")
+
+    start_time = time.time()
+    last_log_time = start_time
+
     for signal in processor.process_stream(stream):
         total_processed += 1
         pbar.update(1)
-        # Регистрация аномалий (сигналов с объяснениями)
+
+        # Регистрация аномалий
         if signal.explanations:
             anomalies_detected += 1
             tqdm.write(f"\n[ТРЕВОГА] {signal.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | Автор: {signal.employee_id}")
             for exp in signal.explanations:
                 tqdm.write(f"  └── {exp}")
+
+        # Логирование скорости каждые 100 сообщений (подобно старой версии)
+        if total_processed % 100 == 0:
+            current_t = time.time()
+            elapsed_interval = current_t - last_log_time
+            speed = 100.0 / elapsed_interval if elapsed_interval > 0 else 0.0
+            if max_messages and max_messages > total_processed:
+                remaining_sec = (max_messages - total_processed) / speed if speed > 0 else 0
+                tqdm.write(f"[ПРОГРЕСС] Обработано {total_processed:,} | Скорость: {speed:.1f} сообщ./сек | Оставшееся время: {remaining_sec/60:.1f} мин.")
+            last_log_time = current_t
+
         if max_messages and total_processed >= max_messages:
             break
-    pbar.close()
 
-    # 4. Итоговая сводка
+    pbar.close()
+    total_time = time.time() - start_time
+    avg_speed = total_processed / total_time if total_time > 0 else 0.0
+
     print("\n" + "-"*70)
     print("ИТОГИ РИСК-СКРИНИНГА:")
     print(f"  • Всего обработано сообщений:       {total_processed:,}")
-    print(f"  • Зафиксировано подозрительных:     {anomalies_detected:,}")
+    print(f"  • Зафиксировано аномальных сигналов: {anomalies_detected:,}")
     print(f"  • Активных профилей сотрудников:    {len(processor.employees):,}")
     print(f"  • Узлов в графе коммуникаций:       {processor.graph.graph.number_of_nodes():,}")
     print(f"  • Рёбер в графе коммуникаций:       {processor.graph.graph.number_of_edges():,}")
+    print(f"  • Общее время работы:               {total_time:.2f} сек.")
+    print(f"  • Средняя скорость конвейера:       {avg_speed:.1f} сообщ./сек.")
     print("-"*70 + "\n")
+
+    # Построение графиков для топ-3 авторов
+    print("[ИНФО] Построение графических отчётов...")
+    visualize_baseline_evolution(processor.employees, top_n=3, output_dir="output")
+    visualize_deviations(processor.employees, top_n=3, output_dir="output")
 
 
 if __name__ == "__main__":
