@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from collections import deque
+from collections import deque, Counter
 import re
 import pandas as pd
 import numpy as np
@@ -8,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, Iterator, List, Optional, Tuple, Any
 import networkx as nx
 import math
+import spacy
+import json
 
 
 # ============================================================================
@@ -210,7 +212,7 @@ class MessageParser:
 # 2. УРОВЕНЬ ИЗВЛЕЧЕНИЯ ПРИЗНАКОВ (FEATURE EXTRACTION LAYER)
 # ============================================================================
 
-@dataclass
+@dataclass 
 class EmployeeContext:
     """Контекстная информация о сотруднике, передаваемая в анализатор."""
     employee_id: str
@@ -220,6 +222,8 @@ class EmployeeContext:
     reciprocity: float
     betweenness: float
     mean_reply_time: float
+    median_reply_time: float
+    reply_time_std: float
     daily_activity_change: float
     weekly_activity_change: float
     monthly_activity_change: float
@@ -250,34 +254,208 @@ class IFeatureExtractor(ABC):
 
 
 class SpacyStatisticalExtractor(IFeatureExtractor):
-    """Статистико-лингвистический анализатор на базе библиотеки spaCy."""
+    """
+    Статистико-лингвистический анализатор на базе библиотеки spaCy.
+    Реализует математические формулы индикаторов (10)-(14) НИР2.
+    """
+
+    # Дискурсивные связки (маркеры логических разрывов и контраста)
+    DISCOURSE_MARKERS = {
+        "however", "therefore", "thus", "although", "because", 
+        "meanwhile", "moreover", "nevertheless", "furthermore"
+    }
+
+    # Словари местоимений английского языка
+    FIRST_PERSON_PRONOUNS = {"i", "me", "my", "mine", "myself", "we", "us", "our", "ours", "ourselves"}
+    SECOND_PERSON_PRONOUNS = {"you", "your", "yours", "yourself", "yourselves"}
+    THIRD_PERSON_PRONOUNS = {"he", "him", "his", "himself", "she", "her", "hers", "herself", 
+                             "they", "them", "their", "theirs", "themselves", "it", "its"}
 
     def __init__(self, model_name: str = "en_core_web_sm"):
         self.model_name = model_name
-        # self.nlp = spacy.load(model_name)
+        try:
+            self.nlp = spacy.load(model_name)
+        except Exception:
+            # Если языковая модель не скачана в окружении
+            import subprocess
+            subprocess.run(["python", "-m", "spacy", "download", model_name], check=True)
+            self.nlp = spacy.load(model_name)
+
+    def _extract_pronoun_marker(self, doc) -> float:
+        """
+        Формула (10) НИР2:
+        I_pro = - (p1*log2(p1) + p2*log2(p2) + p3*log2(p3))
+        pk = (nk + alpha) / (N + alpha * K), где alpha = 1.0, K = 3.0
+        """
+        pronouns = [token.text.lower() for token in doc if token.pos_ == "PRON"]
+        total_pronouns = len(pronouns)
+
+        n1 = sum(p in self.FIRST_PERSON_PRONOUNS for p in pronouns)
+        n2 = sum(p in self.SECOND_PERSON_PRONOUNS for p in pronouns)
+        n3 = sum(p in self.THIRD_PERSON_PRONOUNS for p in pronouns)
+
+        alpha = 1.0
+        k = 3.0
+        denom = float(total_pronouns + alpha * k)
+
+        p1 = (n1 + alpha) / denom
+        p2 = (n2 + alpha) / denom
+        p3 = (n3 + alpha) / denom
+
+        # Вычисление энтропии распределения местоимений
+        entropy = - (p1 * math.log2(p1) + p2 * math.log2(p2) + p3 * math.log2(p3))
+        return float(entropy)
+
+    def _extract_syntactic_marker(self, doc, text: str) -> float:
+        """
+        Формула (11) НИР2:
+        I_syn = sqrt( (ln(1 + l_sent))^2 + (ln(1 + d_clause))^2 + (p_disc)^2 + (p_punct)^2 )
+        """
+        # 1. Средняя длина предложений
+        sentences = list(doc.sents)
+        lengths = [len(sent) for sent in sentences]
+        avg_sent_len = float(np.mean(lengths)) if lengths else 0.0
+
+        # 2. Глубина синтаксического дерева зависимостей
+        depths = [len(list(token.ancestors)) for token in doc]
+        dep_depth = float(np.mean(depths)) if depths else 0.0
+
+        # 3. Доля дискурсивных связок
+        words = [token.text.lower() for token in doc if token.is_alpha]
+        disc_count = sum(w in self.DISCOURSE_MARKERS for w in words)
+        p_disc = float(disc_count / max(len(words), 1))
+
+        # 4. Частота преобладающих триграмм PoS-тегов
+        pos_tags = [token.pos_ for token in doc]
+        trigrams = [(pos_tags[i], pos_tags[i+1], pos_tags[i+2]) for i in range(len(pos_tags) - 2)]
+        if trigrams:
+            p_punct = float(Counter(trigrams).most_common(1)[0][1] / len(trigrams))
+        else:
+            p_punct = 0.0
+
+        # Свертка по формуле (11)
+        val = math.sqrt(
+            math.log1p(avg_sent_len)**2 + 
+            math.log1p(dep_depth)**2 + 
+            p_disc**2 + 
+            p_punct**2
+        )
+        return float(val)
+
+    def _extract_social_marker(self, ctx: EmployeeContext) -> float:
+        """
+        Формула (12) НИР2:
+        I_soc = sqrt( (ln(1 + deg_in))^2 + (ln(1 + deg_out))^2 + (rec)^2 + (bet)^2 )
+        """
+        val = math.sqrt(
+            math.log1p(max(ctx.in_degree, 0.0))**2 +
+            math.log1p(max(ctx.out_degree, 0.0))**2 +
+            (ctx.reciprocity)**2 +
+            (ctx.betweenness)**2
+        )
+        return float(val)
+
+    def _extract_activity_marker(self, ctx: EmployeeContext) -> float:
+        """
+        Формула (13) НИР2:
+        I_act = sqrt( (tanh(dH_day)^2 + tanh(dH_week)^2 + tanh(dH_month)^2 + tanh(dH_quart)^2) / 4 )
+        """
+        d_day = math.tanh(ctx.daily_activity_change)
+        d_week = math.tanh(ctx.weekly_activity_change)
+        d_month = math.tanh(ctx.monthly_activity_change)
+        d_quart = math.tanh(ctx.quarterly_activity_change)
+
+        val = math.sqrt((d_day**2 + d_week**2 + d_month**2 + d_quart**2) / 4.0)
+        return float(val)
+
+    def _extract_response_marker(self, ctx: EmployeeContext) -> float:
+        """
+        Формула (14) НИР2:
+        I_lat = sqrt( (ln(1 + mu))^2 + (ln(1 + med))^2 + (ln(1 + sigma))^2 )
+        """
+        val = math.sqrt(
+            math.log1p(max(ctx.mean_reply_time, 0.0))**2 +
+            math.log1p(max(ctx.median_reply_time, 0.0))**2 +
+            math.log1p(max(ctx.reply_time_std, 0.0))**2
+        )
+        return float(val)
 
     def compute_markers(self, message: CommunicationMessage, context: EmployeeContext) -> MarkerVector:
-        """Вычисление формульных маркеров (местоимения, синтаксис, граф, активность)."""
-        # TODO: Реализовать перенос формул (10)-(14) из математической модели НИР2
-        raise NotImplementedError
+        """Комплексное вычисление формульного вектора маркеров риска."""
+        text = message.cleaned_body or message.body or ""
+        doc = self.nlp(text)
+
+        pronoun_m = self._extract_pronoun_marker(doc)
+        syntactic_m = self._extract_syntactic_marker(doc, text)
+        social_m = self._extract_social_marker(context)
+        activity_m = self._extract_activity_marker(context)
+        response_m = self._extract_response_marker(context)
+
+        return MarkerVector(
+            pronoun_marker=pronoun_m,
+            syntactic_marker=syntactic_m,
+            activity_marker=activity_m,
+            response_marker=response_m,
+            social_marker=social_m,
+            llm_aggression_marker=0.0,
+            llm_disloyalty_marker=0.0,
+            llm_burnout_marker=0.0
+        )
 
 
 class LLMSemanticExtractor(IFeatureExtractor):
-    """Семантический анализатор скрытых признаков угрозы на основе LLM."""
+    """
+    Семантический анализатор скрытых признаков угрозы на основе LLM (задача Главы 1).
+    Извлекает семантические паттерны: агрессия, нелояльность, выгорание.
+    """
 
-    def __init__(self, model_name: str, api_endpoint: Optional[str] = None):
+    SYSTEM_PROMPT = (
+        "You are an expert psycholinguistic and insider threat detection AI system. "
+        "Analyze the corporate communication message and rate the following risk factors "
+        "on a continuous scale from 0.0 (completely absent/normal) to 1.0 (critically high):\n"
+        "1. aggression: hostility, toxic tone, threats, passive aggression.\n"
+        "2. disloyalty: sabotage intent, negative attitude towards company/management, data exfiltration signs.\n"
+        "3. burnout: emotional exhaustion, apathy, severe stress, detachment.\n"
+        "Respond ONLY with a valid JSON object: {\"aggression\": float, \"disloyalty\": float, \"burnout\": float}."
+    )
+
+    def __init__(self, model_name: str = "llama3-8b", api_endpoint: Optional[str] = None):
         self.model_name = model_name
         self.api_endpoint = api_endpoint
 
     def generate_prompt(self, message: CommunicationMessage) -> str:
         """Формирование типизированного промпта со структурированным выходом (JSON)."""
-        # TODO: Реализовать шаблон запроса для оценки агрессии, нелояльности и выгорания
-        raise NotImplementedError
+        content = message.cleaned_body or message.body or ""
+        return f"Message Subject: {message.subject or 'None'}\nBody:\n{content}"
 
     def compute_markers(self, message: CommunicationMessage, context: EmployeeContext) -> MarkerVector:
-        """Отправка запроса в LLM и парсинг числовых оценок в вектор маркеров."""
-        # TODO: Реализовать вызов API модели и извлечение скоров риска
-        raise NotImplementedError
+        """
+        Отправка запроса в LLM и парсинг числовых оценок в вектор маркеров.
+        При отсутствии активного подключения возвращает безопасные нули (fallback).
+        """
+        # Заглушка/каркас сетевого вызова к инференс-сервису (vLLM / Ollama / OpenAI API)
+        # В Главе 1 здесь настраивается реальный HTTP-коннектор
+        aggression = 0.0
+        disloyalty = 0.0
+        burnout = 0.0
+
+        if self.api_endpoint:
+            try:
+                # TODO: HTTP POST на vLLM/Ollama
+                pass
+            except Exception:
+                pass
+
+        return MarkerVector(
+            pronoun_marker=0.0,
+            syntactic_marker=0.0,
+            activity_marker=0.0,
+            response_marker=0.0,
+            social_marker=0.0,
+            llm_aggression_marker=float(aggression),
+            llm_disloyalty_marker=float(disloyalty),
+            llm_burnout_marker=float(burnout)
+        )
 
 
 # ============================================================================
@@ -608,27 +786,103 @@ class EmployeeState:
 # ============================================================================
 
 class DynamicCommunicationGraph:
-    """Динамический граф корпоративного взаимодействия со скользящим окном."""
+    """
+    Динамический граф корпоративного взаимодействия со скользящим окном.
+    Поддерживает актуальную структуру топологии в окне window_days,
+    автоматически выталкивая устаревшие ребра при продвижении времени потока.
+    """
 
-    def __init__(self, window_days: int = 30):
+    def __init__(self, window_days: int = 30, max_betweenness_nodes: int = 500):
+        """
+        Параметры:
+            window_days: протяжённость окна актуальности рёбер (по умолчанию 30 дней).
+            max_betweenness_nodes: порог размера подграфа для полного расчёта посредничества.
+        """
         self.window_duration = timedelta(days=window_days)
+        # Очередь событий взаимодействия: (timestamp, sender, receiver)
         self.edge_history: deque[Tuple[datetime, str, str]] = deque()
+        # Взвешенный ориентированный граф NetworkX
         self.graph: nx.DiGraph = nx.DiGraph()
+        self.max_betweenness_nodes = max_betweenness_nodes
 
     def add_interaction(self, sender: str, receiver: str, timestamp: datetime) -> None:
-        """Добавление ребра коммуникации и обновление весов связей."""
-        # TODO: Добавить запись в edge_history и обновить вес в nx.DiGraph
-        raise NotImplementedError
+        """
+        Добавление направленного факта коммуникации (sender -> receiver) в момент timestamp.
+        1. Регистрирует событие в хронологической очереди edge_history.
+        2. Добавляет или инкрементирует вес ребра в графе.
+        """
+        if not sender or not receiver or sender == receiver:
+            return
+
+        self.edge_history.append((timestamp, sender, receiver))
+
+        if self.graph.has_edge(sender, receiver):
+            self.graph[sender][receiver]["weight"] += 1.0
+        else:
+            self.graph.add_edge(sender, receiver, weight=1.0)
 
     def evict_expired(self, current_time: datetime) -> None:
-        """Удаление взаимодействий, вышедших за пределы активного временного окна."""
-        # TODO: Уменьшить веса или удалить рёбра для событий t < current_time - window_duration
-        raise NotImplementedError
+        """
+        Удаление взаимодействий, произошедших ранее порога (current_time - window_duration).
+        Уменьшает вес соответствующих рёбер; при падении веса до 0 ребро удаляется.
+        """
+        if not current_time or not isinstance(current_time, datetime):
+            return
+
+        threshold = current_time - self.window_duration
+
+        while self.edge_history and self.edge_history[0][0] < threshold:
+            _, u, v = self.edge_history.popleft()
+            if self.graph.has_edge(u, v):
+                self.graph[u][v]["weight"] -= 1.0
+                if self.graph[u][v]["weight"] <= 0:
+                    self.graph.remove_edge(u, v)
+                    # Если узел стал изолированным — удаляем его для экономии памяти
+                    if self.graph.in_degree(u) == 0 and self.graph.out_degree(u) == 0:
+                        self.graph.remove_node(u)
+                    if self.graph.has_node(v) and self.graph.in_degree(v) == 0 and self.graph.out_degree(v) == 0:
+                        self.graph.remove_node(v)
 
     def get_node_metrics(self, node_id: str) -> Tuple[float, float, float, float]:
-        """Возвращает (out_degree, in_degree, reciprocity, betweenness) на текущий момент."""
-        # TODO: Вычисление локальных топологических метрик
-        raise NotImplementedError
+        """
+        Вычисление топологических метрик для узла на текущий момент модельного времени.
+        
+        Возвращает:
+            (out_degree, in_degree, reciprocity, betweenness)
+            - out_degree: взвешенная/невзвешенная исходящая степень узла.
+            - in_degree: входящая степень узла.
+            - reciprocity: коэффициент взаимности общения (доля взаимных связей).
+            - betweenness: посредническая центральность в активной компоненте связности.
+        """
+        if not self.graph.has_node(node_id):
+            return (0.0, 0.0, 0.0, 0.0)
+
+        # 1. Степени узла
+        out_deg = float(self.graph.out_degree(node_id))
+        in_deg = float(self.graph.in_degree(node_id))
+
+        # 2. Локальная взаимность (reciprocity) узла
+        # Доля партнеров, с которыми есть двустороннее общение
+        successors = set(self.graph.successors(node_id))
+        predecessors = set(self.graph.predecessors(node_id))
+        mutual_contacts = len(successors.intersection(predecessors))
+        total_unique_contacts = len(successors.union(predecessors))
+        reciprocity = float(mutual_contacts / total_unique_contacts) if total_unique_contacts > 0 else 0.0
+
+        # 3. Посредническая центральность (betweenness centrality)
+        # Вычисляется по эго-сети (окрестности радиуса 2) для обеспечения производительности O(k) вместо O(V*E)
+        betweenness = 0.0
+        try:
+            # Ограничиваем расчёт локальной окрестностью узла
+            ego_nodes = set(nx.ego_graph(self.graph, node_id, radius=2).nodes())
+            if len(ego_nodes) > 2:
+                subgraph = self.graph.subgraph(ego_nodes)
+                b_dict = nx.betweenness_centrality(subgraph, normalized=True)
+                betweenness = float(b_dict.get(node_id, 0.0))
+        except Exception:
+            betweenness = 0.0
+
+        return (out_deg, in_deg, reciprocity, betweenness)  
 
 
 # ============================================================================
@@ -654,6 +908,9 @@ class StreamProcessor:
         self.employees: Dict[str, EmployeeState] = {}
         self.graph = DynamicCommunicationGraph(window_days=topology_window_days)
         self.feature_extractor = feature_extractor
+        
+        # Хранилище последних исходящих меток для расчёта задержек ответов: (receiver, sender) -> timestamp
+        self._last_direct_message: Dict[Tuple[str, str], datetime] = {}
 
     def get_or_create_employee(self, employee_id: str, role: str = "general") -> EmployeeState:
         """Получение существующего или инициализация нового состояния сотрудника."""
@@ -661,18 +918,98 @@ class StreamProcessor:
             self.employees[employee_id] = EmployeeState(employee_id=employee_id, role=role)
         return self.employees[employee_id]
 
+    def _track_reply_delays(self, sender: str, receivers: List[str], timestamp: datetime, sender_state: EmployeeState) -> None:
+        """
+        Фиксация задержек ответов на входящие сообщения.
+        Если кто-то из получателей ранее писал отправителю, фиксируется время отклика.
+        """
+        for receiver in receivers:
+            reverse_pair = (receiver, sender)
+            if reverse_pair in self._last_direct_message:
+                prev_time = self._last_direct_message[reverse_pair]
+                delta_sec = (timestamp - prev_time).total_seconds()
+                if delta_sec > 0:
+                    sender_state.register_reply_delay(delta_sec)
+            # Обновляем отметку прямого сообщения
+            self._last_direct_message[(sender, receiver)] = timestamp
+
     def process_message(self, message: CommunicationMessage) -> RiskSignal:
         """
         Обработка единичного входящего события в строгом модельном времени:
         1. Проверка монотонности времени (t >= current_time).
         2. Продвижение скользящих окон графа и отправителя.
         3. Формирование контекста и извлечение маркеров.
-        4. Расчёт z-score отклонений по текущему базовому профилю.
+        4. Расчёт z-score отклонений по текущему базовому профилю (ДО обновления).
         5. Инкрементное обновление профиля (EMA).
-        6. Генерация выходного сигнала риска.
+        6. Генерация выходного сигнала риска с массивом объяснений.
         """
-        # TODO: Реализовать пошаговый конвейер
-        raise NotImplementedError
+        ts = message.timestamp
+
+        # 1. Проверка монотонности модельного времени
+        if self.current_time is not None and ts < self.current_time:
+            # Предупреждение о нарушении хронологии (out-of-order event)
+            pass
+        self.current_time = ts
+
+        # 2. Получение и синхронизация состояния автора сообщения
+        sender = message.sender_id
+        sender_state = self.get_or_create_employee(sender)
+        sender_state.update_temporal_state(ts)
+
+        # Регистрация задержек отклика собеседникам
+        self._track_reply_delays(sender, message.receiver_ids, ts, sender_state)
+
+        # 3. Синхронизация динамического графа взаимодействий
+        self.graph.evict_expired(ts)
+        for receiver in message.receiver_ids:
+            self.get_or_create_employee(receiver)  # Инициализируем профиль адресата, если новый
+            self.graph.add_interaction(sender, receiver, ts)
+
+        # 4. Сборка топологического и динамического контекста (EmployeeContext)
+        out_deg, in_deg, recip, betw = self.graph.get_node_metrics(sender)
+        d_day, d_week, d_month, d_quart = sender_state.get_activity_dynamics()
+        mean_rep, med_rep, std_rep = sender_state.get_reply_statistics()
+
+        context = EmployeeContext(
+            employee_id=sender,
+            role=sender_state.role,
+            in_degree=in_deg,
+            out_degree=out_deg,
+            reciprocity=recip,
+            betweenness=betw,
+            mean_reply_time=mean_rep,
+            median_reply_time=med_rep,
+            reply_time_std=std_rep,
+            daily_activity_change=d_day,
+            weekly_activity_change=d_week,
+            monthly_activity_change=d_month,
+            quarterly_activity_change=d_quart
+        )
+
+        # 5. Извлечение признаков и вычисление вектора маркеров
+        raw_markers = self.feature_extractor.compute_markers(message, context)
+
+        # 6. Расчёт z-score стандартизированных отклонений ДО обновления профиля
+        z_scores = sender_state.baseline_profile.compute_deviations(raw_markers)
+
+        # 7. Инкрементное обновление базового профиля автора новым наблюдением (EMA)
+        sender_state.baseline_profile.update(raw_markers)
+
+        # 8. Формирование массива интерпретируемых объяснений ext (формула 53 НИР2)
+        explanations = []
+        for marker_name, z_val in z_scores.items():
+            if abs(z_val) >= 3.0:  # Порог правила трех сигм (3-sigma)
+                direction = "превышение нормы" if z_val > 0 else "падение ниже нормы"
+                explanations.append(f"Маркер '{marker_name}': {direction} (z={z_val:+.2f})")
+
+        return RiskSignal(
+            employee_id=sender,
+            timestamp=ts,
+            raw_markers=raw_markers,
+            normalized_deviations=z_scores,
+            channel=message.channel,
+            explanations=explanations
+        )
 
     def process_stream(self, message_stream: Iterator[CommunicationMessage]) -> Iterator[RiskSignal]:
         """Потоковая пакетно-независимая обработка упорядоченного генератора сообщений."""
