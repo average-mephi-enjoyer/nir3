@@ -10,6 +10,8 @@ import networkx as nx
 import math
 import spacy
 import json
+import os
+from tqdm import tqdm
 
 
 # ============================================================================
@@ -39,17 +41,14 @@ class CommunicationMessage:
 
 class MessageParser:
     """Компонент парсинга, нормализации и очистки корпуса сообщений."""
-
     # Регулярное выражение для извлечения канонического email или ID сотрудника
     EMAIL_REGEX = re.compile(r'[\w\.-]+@[\w\.-]+|[A-Za-z]{2,3}\d{4}')
-
     # Шаблоны служебных цитат и заголовков пересылки ответов
     QUOTE_PATTERNS = [
         re.compile(r'-{3,}\s*Original Message\s*-{3,}', re.IGNORECASE),
         re.compile(r'-{3,}\s*Forwarded by\s*-{3,}', re.IGNORECASE),
         re.compile(r'From:\s*.*?\nSent:\s*.*?\nTo:\s*', re.IGNORECASE),
     ]
-
     # Черный список отправителей (системные боты, рассылки, демоны доставки)
     SYSTEM_ACCOUNTS = {
         'mailer-daemon', 'postmaster', 'no-reply', 'noreply', 
@@ -86,20 +85,17 @@ class MessageParser:
         if not body or pd.isna(body):
             return ""
         text = str(body)
-
         # 1. Отсечение по сигнатурам цитирования/пересылки
         for pattern in self.QUOTE_PATTERNS:
             match = pattern.search(text)
             if match:
                 text = text[:match.start()]
-
         # 2. Построчная фильтрация строк цитирования '>'
         cleaned_lines = []
         for line in text.splitlines():
             stripped = line.strip()
             if not stripped.startswith('>'):
                 cleaned_lines.append(line)
-
         return "\n".join(cleaned_lines).strip()
 
     def parse_timestamp(self, raw_ts: Any) -> Optional[datetime]:
@@ -122,12 +118,10 @@ class MessageParser:
         """Парсинг сырого MIME/RFC 822 сообщения в объект CommunicationMessage."""
         if not raw_content or pd.isna(raw_content):
             return None
-
         lines = str(raw_content).splitlines()
         headers: Dict[str, str] = {}
         current_header = None
         body_start = len(lines)
-
         for i, line in enumerate(lines):
             if line.strip() == "":
                 body_start = i + 1
@@ -138,15 +132,12 @@ class MessageParser:
                 key, val = line.split(":", 1)
                 current_header = key.strip().lower()
                 headers[current_header] = val.strip()
-
         sender = self.normalize_email(headers.get("from", ""))
         receivers = self.parse_recipient_list(headers.get("to", ""))
         ts = self.parse_timestamp(headers.get("date"))
         subject = headers.get("subject", "")
-
         raw_body = "\n".join(lines[body_start:]).strip()
         cleaned_body = self.clean_quoted_text(raw_body)
-
         msg = CommunicationMessage(
             sender_id=sender or "",
             receiver_ids=receivers,
@@ -163,25 +154,19 @@ class MessageParser:
         sender = self.normalize_email(row.get("from") or row.get("user"))
         if not sender or sender in self.SYSTEM_ACCOUNTS:
             return None
-
         to_list = self.parse_recipient_list(row.get("to"))
         cc_list = self.parse_recipient_list(row.get("cc"))
         bcc_list = self.parse_recipient_list(row.get("bcc"))
         all_receivers = list(dict.fromkeys(to_list + cc_list + bcc_list))
-
         if not all_receivers:
             return None
-
         ts = self.parse_timestamp(row.get("date"))
         if not ts:
             return None
-
         content = str(row.get("content", ""))
         cleaned = self.clean_quoted_text(content)
-
         if len(cleaned) < self.min_body_length:
             return None
-
         return CommunicationMessage(
             sender_id=sender,
             receiver_ids=all_receivers,
@@ -208,6 +193,8 @@ class MessageParser:
                 msg = self.parse_cert_row(row.to_dict())
                 if msg and msg.is_valid():
                     yield msg
+
+
 # ============================================================================
 # 2. УРОВЕНЬ ИЗВЛЕЧЕНИЯ ПРИЗНАКОВ (FEATURE EXTRACTION LAYER)
 # ============================================================================
@@ -258,13 +245,11 @@ class SpacyStatisticalExtractor(IFeatureExtractor):
     Статистико-лингвистический анализатор на базе библиотеки spaCy.
     Реализует математические формулы индикаторов (10)-(14) НИР2.
     """
-
     # Дискурсивные связки (маркеры логических разрывов и контраста)
     DISCOURSE_MARKERS = {
         "however", "therefore", "thus", "although", "because", 
         "meanwhile", "moreover", "nevertheless", "furthermore"
     }
-
     # Словари местоимений английского языка
     FIRST_PERSON_PRONOUNS = {"i", "me", "my", "mine", "myself", "we", "us", "our", "ours", "ourselves"}
     SECOND_PERSON_PRONOUNS = {"you", "your", "yours", "yourself", "yourselves"}
@@ -289,19 +274,15 @@ class SpacyStatisticalExtractor(IFeatureExtractor):
         """
         pronouns = [token.text.lower() for token in doc if token.pos_ == "PRON"]
         total_pronouns = len(pronouns)
-
         n1 = sum(p in self.FIRST_PERSON_PRONOUNS for p in pronouns)
         n2 = sum(p in self.SECOND_PERSON_PRONOUNS for p in pronouns)
         n3 = sum(p in self.THIRD_PERSON_PRONOUNS for p in pronouns)
-
         alpha = 1.0
         k = 3.0
         denom = float(total_pronouns + alpha * k)
-
         p1 = (n1 + alpha) / denom
         p2 = (n2 + alpha) / denom
         p3 = (n3 + alpha) / denom
-
         # Вычисление энтропии распределения местоимений
         entropy = - (p1 * math.log2(p1) + p2 * math.log2(p2) + p3 * math.log2(p3))
         return float(entropy)
@@ -315,16 +296,13 @@ class SpacyStatisticalExtractor(IFeatureExtractor):
         sentences = list(doc.sents)
         lengths = [len(sent) for sent in sentences]
         avg_sent_len = float(np.mean(lengths)) if lengths else 0.0
-
         # 2. Глубина синтаксического дерева зависимостей
         depths = [len(list(token.ancestors)) for token in doc]
         dep_depth = float(np.mean(depths)) if depths else 0.0
-
         # 3. Доля дискурсивных связок
         words = [token.text.lower() for token in doc if token.is_alpha]
         disc_count = sum(w in self.DISCOURSE_MARKERS for w in words)
         p_disc = float(disc_count / max(len(words), 1))
-
         # 4. Частота преобладающих триграмм PoS-тегов
         pos_tags = [token.pos_ for token in doc]
         trigrams = [(pos_tags[i], pos_tags[i+1], pos_tags[i+2]) for i in range(len(pos_tags) - 2)]
@@ -332,7 +310,6 @@ class SpacyStatisticalExtractor(IFeatureExtractor):
             p_punct = float(Counter(trigrams).most_common(1)[0][1] / len(trigrams))
         else:
             p_punct = 0.0
-
         # Свертка по формуле (11)
         val = math.sqrt(
             math.log1p(avg_sent_len)**2 + 
@@ -384,13 +361,11 @@ class SpacyStatisticalExtractor(IFeatureExtractor):
         """Комплексное вычисление формульного вектора маркеров риска."""
         text = message.cleaned_body or message.body or ""
         doc = self.nlp(text)
-
         pronoun_m = self._extract_pronoun_marker(doc)
         syntactic_m = self._extract_syntactic_marker(doc, text)
         social_m = self._extract_social_marker(context)
         activity_m = self._extract_activity_marker(context)
         response_m = self._extract_response_marker(context)
-
         return MarkerVector(
             pronoun_marker=pronoun_m,
             syntactic_marker=syntactic_m,
@@ -408,7 +383,6 @@ class LLMSemanticExtractor(IFeatureExtractor):
     Семантический анализатор скрытых признаков угрозы на основе LLM (задача Главы 1).
     Извлекает семантические паттерны: агрессия, нелояльность, выгорание.
     """
-
     SYSTEM_PROMPT = (
         "You are an expert psycholinguistic and insider threat detection AI system. "
         "Analyze the corporate communication message and rate the following risk factors "
@@ -433,19 +407,17 @@ class LLMSemanticExtractor(IFeatureExtractor):
         Отправка запроса в LLM и парсинг числовых оценок в вектор маркеров.
         При отсутствии активного подключения возвращает безопасные нули (fallback).
         """
-        # Заглушка/каркас сетевого вызова к инференс-сервису (vLLM / Ollama / OpenAI API)
+        # TODO Заглушка/каркас сетевого вызова к инференс-сервису (vLLM / Ollama / OpenAI API)
         # В Главе 1 здесь настраивается реальный HTTP-коннектор
         aggression = 0.0
         disloyalty = 0.0
         burnout = 0.0
-
         if self.api_endpoint:
             try:
                 # TODO: HTTP POST на vLLM/Ollama
                 pass
             except Exception:
                 pass
-
         return MarkerVector(
             pronoun_marker=0.0,
             syntactic_marker=0.0,
@@ -495,13 +467,10 @@ class SlidingTimeWindow:
         """
         if not current_time or not isinstance(current_time, datetime):
             return len(self.events_queue)
-
         threshold = current_time - self.window_duration
-
         # Выталкиваем из головы очереди все события, произошедшие ранее порогового времени
         while self.events_queue and self.events_queue[0] < threshold:
             self.events_queue.popleft()
-
         return len(self.events_queue)
 
     def get_count(self) -> int:
@@ -517,7 +486,6 @@ class BaselineProfile:
     Реализует математическую модель динамического профилирования
     (формулы 18, 21-22 отчёта НИР2).
     """
-
     # Список отслеживаемых маркеров риска (согласован с MarkerVector)
     TRACKED_MARKERS = [
         "pronoun_marker",
@@ -553,11 +521,9 @@ class BaselineProfile:
         self.clip_limit = clip_limit
         self.warmup_threshold = warmup_threshold
         self.role_priors = role_priors or {}
-
         self.observations_count: int = 0
         self.means: Dict[str, float] = {}
         self.variances: Dict[str, float] = {}
-
         # Инициализация структур профиля нулями или априорными ролевыми значениями
         for marker in self.TRACKED_MARKERS:
             prior = self.role_priors.get(marker, {})
@@ -586,27 +552,21 @@ class BaselineProfile:
         """
         marker_vals = self._get_marker_dict(markers)
         z_scores: Dict[str, float] = {}
-
         # Если наблюдений ещё не было и ролевых априоров нет — отклонение нейтральное (0.0)
         if self.observations_count == 0 and not self.role_priors:
             return {m: 0.0 for m in self.TRACKED_MARKERS}
-
         for m in self.TRACKED_MARKERS:
             val = marker_vals[m]
             mean = self.means[m]
             var = self.variances[m]
-
             # Защита от нулевой дисперсии (min_variance = epsilon)
             safe_var = max(var, self.min_variance)
             std = math.sqrt(safe_var)
-
             # Формула (18)
             raw_z = (val - mean) / std
-
             # Отсечение экстремальных выбросов
             z_clipped = max(-self.clip_limit, min(self.clip_limit, raw_z))
             z_scores[m] = float(z_clipped)
-
         return z_scores
 
     def update(self, markers: MarkerVector) -> None:
@@ -632,18 +592,13 @@ class BaselineProfile:
             val = marker_vals[m]
             prev_mean = self.means[m]
             prev_var = self.variances[m]
-
             diff = val - prev_mean
-
             # Формула (21)
             new_mean = prev_mean + self.alpha_ema * diff
-
             # Формула (22)
             new_var = (1.0 - self.alpha_ema) * (prev_var + self.alpha_ema * (diff ** 2))
-
             self.means[m] = float(new_mean)
             self.variances[m] = float(new_var)
-
         self.observations_count += 1
 
     def get_mean(self, marker_name: str) -> float:
@@ -669,16 +624,13 @@ class EmployeeState:
         self.first_seen: Optional[datetime] = None
         self.last_seen: Optional[datetime] = None
         self.total_messages_sent: int = 0
-
         # Иерархия скользящих временных окон (сутки, неделя, месяц, квартал)
         self.daily_window = SlidingTimeWindow(window_duration_days=1)
         self.weekly_window = SlidingTimeWindow(window_duration_days=7)
         self.monthly_window = SlidingTimeWindow(window_duration_days=30)
         self.quarterly_window = SlidingTimeWindow(window_duration_days=90)
-
         # Буфер задержек ответов (в секундах) на входящие сообщения
         self.reply_delays: deque[float] = deque(maxlen=100)
-
         # Динамический базовый профиль маркеров риска (EMA)
         self.baseline_profile = BaselineProfile()
 
@@ -691,18 +643,15 @@ class EmployeeState:
         """
         if not isinstance(timestamp, datetime):
             return
-
         if self.first_seen is None:
             self.first_seen = timestamp
         self.last_seen = timestamp
         self.total_messages_sent += 1
-
         # Очистка устаревших событий по текущему модельному времени
         self.daily_window.evict_expired(timestamp)
         self.weekly_window.evict_expired(timestamp)
         self.monthly_window.evict_expired(timestamp)
         self.quarterly_window.evict_expired(timestamp)
-
         # Добавление текущего события во все скользящие окна
         self.daily_window.push_event(timestamp)
         self.weekly_window.push_event(timestamp)
@@ -733,19 +682,15 @@ class EmployeeState:
         n_week = float(self.weekly_window.get_count())
         n_month = float(self.monthly_window.get_count())
         n_quarter = float(self.quarterly_window.get_count())
-
         # 1. Суточный темп относительно недельной нормы
         expected_daily = n_week / 7.0
         daily_change = (n_day - expected_daily) / max(expected_daily, 1.0)
-
         # 2. Недельный темп относительно месячной нормы (~30/7 = 4.285)
         expected_weekly = n_month / 4.2857
         weekly_change = (n_week - expected_weekly) / max(expected_weekly, 1.0)
-
         # 3. Месячный темп относительно квартальной нормы (90/30 = 3.0)
         expected_monthly = n_quarter / 3.0
         monthly_change = (n_month - expected_monthly) / max(expected_monthly, 1.0)
-
         # 4. Квартальный темп относительно общего стажа наблюдений
         if self.first_seen and self.last_seen:
             history_days = max((self.last_seen - self.first_seen).total_seconds() / 86400.0, 1.0)
@@ -753,7 +698,6 @@ class EmployeeState:
         else:
             expected_quarterly = n_quarter
         quarterly_change = (n_quarter - expected_quarterly) / max(expected_quarterly, 1.0)
-
         return (
             float(daily_change),
             float(weekly_change),
@@ -772,12 +716,10 @@ class EmployeeState:
         """
         if not self.reply_delays:
             return (0.0, 0.0, 0.0)
-
         arr = np.array(self.reply_delays, dtype=np.float64)
         mean_val = float(np.mean(arr))
         median_val = float(np.median(arr))
         std_val = float(np.std(arr)) if len(arr) > 1 else 0.0
-
         return (mean_val, median_val, std_val)
 
 
@@ -813,9 +755,7 @@ class DynamicCommunicationGraph:
         """
         if not sender or not receiver or sender == receiver:
             return
-
         self.edge_history.append((timestamp, sender, receiver))
-
         if self.graph.has_edge(sender, receiver):
             self.graph[sender][receiver]["weight"] += 1.0
         else:
@@ -828,9 +768,7 @@ class DynamicCommunicationGraph:
         """
         if not current_time or not isinstance(current_time, datetime):
             return
-
         threshold = current_time - self.window_duration
-
         while self.edge_history and self.edge_history[0][0] < threshold:
             _, u, v = self.edge_history.popleft()
             if self.graph.has_edge(u, v):
@@ -856,11 +794,9 @@ class DynamicCommunicationGraph:
         """
         if not self.graph.has_node(node_id):
             return (0.0, 0.0, 0.0, 0.0)
-
         # 1. Степени узла
         out_deg = float(self.graph.out_degree(node_id))
         in_deg = float(self.graph.in_degree(node_id))
-
         # 2. Локальная взаимность (reciprocity) узла
         # Доля партнеров, с которыми есть двустороннее общение
         successors = set(self.graph.successors(node_id))
@@ -868,7 +804,6 @@ class DynamicCommunicationGraph:
         mutual_contacts = len(successors.intersection(predecessors))
         total_unique_contacts = len(successors.union(predecessors))
         reciprocity = float(mutual_contacts / total_unique_contacts) if total_unique_contacts > 0 else 0.0
-
         # 3. Посредническая центральность (betweenness centrality)
         # Вычисляется по эго-сети (окрестности радиуса 2) для обеспечения производительности O(k) вместо O(V*E)
         betweenness = 0.0
@@ -881,7 +816,6 @@ class DynamicCommunicationGraph:
                 betweenness = float(b_dict.get(node_id, 0.0))
         except Exception:
             betweenness = 0.0
-
         return (out_deg, in_deg, reciprocity, betweenness)  
 
 
@@ -908,7 +842,6 @@ class StreamProcessor:
         self.employees: Dict[str, EmployeeState] = {}
         self.graph = DynamicCommunicationGraph(window_days=topology_window_days)
         self.feature_extractor = feature_extractor
-        
         # Хранилище последних исходящих меток для расчёта задержек ответов: (receiver, sender) -> timestamp
         self._last_direct_message: Dict[Tuple[str, str], datetime] = {}
 
@@ -944,32 +877,26 @@ class StreamProcessor:
         6. Генерация выходного сигнала риска с массивом объяснений.
         """
         ts = message.timestamp
-
         # 1. Проверка монотонности модельного времени
         if self.current_time is not None and ts < self.current_time:
             # Предупреждение о нарушении хронологии (out-of-order event)
             pass
         self.current_time = ts
-
         # 2. Получение и синхронизация состояния автора сообщения
         sender = message.sender_id
         sender_state = self.get_or_create_employee(sender)
         sender_state.update_temporal_state(ts)
-
         # Регистрация задержек отклика собеседникам
         self._track_reply_delays(sender, message.receiver_ids, ts, sender_state)
-
         # 3. Синхронизация динамического графа взаимодействий
         self.graph.evict_expired(ts)
         for receiver in message.receiver_ids:
             self.get_or_create_employee(receiver)  # Инициализируем профиль адресата, если новый
             self.graph.add_interaction(sender, receiver, ts)
-
         # 4. Сборка топологического и динамического контекста (EmployeeContext)
         out_deg, in_deg, recip, betw = self.graph.get_node_metrics(sender)
         d_day, d_week, d_month, d_quart = sender_state.get_activity_dynamics()
         mean_rep, med_rep, std_rep = sender_state.get_reply_statistics()
-
         context = EmployeeContext(
             employee_id=sender,
             role=sender_state.role,
@@ -985,23 +912,18 @@ class StreamProcessor:
             monthly_activity_change=d_month,
             quarterly_activity_change=d_quart
         )
-
         # 5. Извлечение признаков и вычисление вектора маркеров
         raw_markers = self.feature_extractor.compute_markers(message, context)
-
         # 6. Расчёт z-score стандартизированных отклонений ДО обновления профиля
         z_scores = sender_state.baseline_profile.compute_deviations(raw_markers)
-
         # 7. Инкрементное обновление базового профиля автора новым наблюдением (EMA)
         sender_state.baseline_profile.update(raw_markers)
-
         # 8. Формирование массива интерпретируемых объяснений ext (формула 53 НИР2)
         explanations = []
         for marker_name, z_val in z_scores.items():
             if abs(z_val) >= 3.0:  # Порог правила трех сигм (3-sigma)
                 direction = "превышение нормы" if z_val > 0 else "падение ниже нормы"
                 explanations.append(f"Маркер '{marker_name}': {direction} (z={z_val:+.2f})")
-
         return RiskSignal(
             employee_id=sender,
             timestamp=ts,
@@ -1016,3 +938,102 @@ class StreamProcessor:
         for msg in message_stream:
             if msg.is_valid():
                 yield self.process_message(msg)
+
+
+def run_pipeline(
+    dataset_path: Optional[str] = None, 
+    max_messages: Optional[int] = 1000,
+    topology_window_days: int = 30
+):
+    """
+    Запуск сквозного конвейера потокового риск-скрининга.
+    
+    Параметры:
+        dataset_path: путь к файлу CERT r4.2 (email.csv) или None для демо-режима.
+        max_messages: лимит сообщений для тестового прогона.
+        topology_window_days: протяженность скользящего окна графа связей.
+    """
+    print("\n" + "="*70)
+    print("  СИСТЕМА ДВУХЭТАПНОГО ВЫЯВЛЕНИЯ ИНСАЙДЕРСКИХ УГРОЗ: ЭТАП 1")
+    print("  (Потоковый риск-скрининг и динамическое профилирование)")
+    print("="*70)
+    # 1. Инициализация экстрактора признаков и потокового диспетчера
+    print("\n[ИНФО] Инициализация экстрактора признаков spaCy...")
+    extractor = SpacyStatisticalExtractor(model_name="en_core_web_sm")
+    print(f"[ИНФО] Запуск StreamProcessor (скользящее окно графа: {topology_window_days} дн.)...")
+    processor = StreamProcessor(
+        feature_extractor=extractor, 
+        topology_window_days=topology_window_days
+    )
+    parser = MessageParser(min_body_length=5)
+    # 2. Подготовка генератора потока сообщений
+    if dataset_path and os.path.exists(dataset_path):
+        print(f"[ИНФО] Подключение к датасету: '{dataset_path}'")
+        stream = parser.stream_cert_emails(dataset_path)
+    else:
+        print("[ВНИМАНИЕ] Файл датасета не указан или не найден. Запуск демонстрационного потока...")
+        # Синтетический временной ряд из нескольких сообщений для верификации работы конвейера
+        base_time = datetime(2026, 1, 15, 9, 0, 0, tzinfo=timezone.utc)
+        demo_messages = [
+            CommunicationMessage(
+                sender_id="aab0573@dtaa.com",
+                receiver_ids=["cgh0024@dtaa.com"],
+                timestamp=base_time,
+                subject="Status report",
+                body="Hello team. Here is our regular weekly status update on project milestones."
+            ),
+            CommunicationMessage(
+                sender_id="cgh0024@dtaa.com",
+                receiver_ids=["aab0573@dtaa.com"],
+                timestamp=base_time + timedelta(minutes=15),
+                subject="Re: Status report",
+                body="Thanks, acknowledged. Reviewing the metrics now."
+            ),
+            CommunicationMessage(
+                sender_id="aab0573@dtaa.com",
+                receiver_ids=["cgh0024@dtaa.com", "xyz0999@dtaa.com"],
+                timestamp=base_time + timedelta(hours=3),
+                subject="Urgent issue",
+                body="I don't care about these useless procedures anymore! You always block my work. Why do I have to explain myself?"
+            ),
+        ]
+        stream = iter(demo_messages)
+
+    # 3. Потоковая обработка сообщений
+    total_processed = 0
+    anomalies_detected = 0
+    print("\n[ИНФО] Обработка потока событий...")
+    pbar = tqdm(total=max_messages, desc="Скрининг событий", unit="msg")
+    for signal in processor.process_stream(stream):
+        total_processed += 1
+        pbar.update(1)
+        # Регистрация аномалий (сигналов с объяснениями)
+        if signal.explanations:
+            anomalies_detected += 1
+            tqdm.write(f"\n[ТРЕВОГА] {signal.timestamp.strftime('%Y-%m-%d %H:%M:%S')} | Автор: {signal.employee_id}")
+            for exp in signal.explanations:
+                tqdm.write(f"  └── {exp}")
+        if max_messages and total_processed >= max_messages:
+            break
+    pbar.close()
+
+    # 4. Итоговая сводка
+    print("\n" + "-"*70)
+    print("ИТОГИ РИСК-СКРИНИНГА:")
+    print(f"  • Всего обработано сообщений:       {total_processed:,}")
+    print(f"  • Зафиксировано подозрительных:     {anomalies_detected:,}")
+    print(f"  • Активных профилей сотрудников:    {len(processor.employees):,}")
+    print(f"  • Узлов в графе коммуникаций:       {processor.graph.graph.number_of_nodes():,}")
+    print(f"  • Рёбер в графе коммуникаций:       {processor.graph.graph.number_of_edges():,}")
+    print("-"*70 + "\n")
+
+
+if __name__ == "__main__":
+    # Укажите путь к распакованному файлу email.csv из CERT r4.2
+    # Например: CERT_EMAIL_PATH = "data/CERT_r4.2/email.csv"
+    CERT_EMAIL_PATH = None
+    run_pipeline(
+        dataset_path=CERT_EMAIL_PATH,
+        max_messages=1000,
+        topology_window_days=30
+    )
