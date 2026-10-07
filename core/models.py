@@ -71,3 +71,17 @@ class RiskSignal:
     channel: str = "email"
     explanations: List[str] = field(default_factory=list)
     evidence_spans: List[str] = field(default_factory=list)
+
+
+@dataclass
+class TelemetryEvent:
+    """
+    Событие системной телеметрии (CERT r4.2: logon, device, file, http).
+    """
+    event_id: str
+    user_id: str
+    timestamp: datetime
+    event_type: str  # 'logon', 'logoff', 'device_connect', 'device_disconnect', 'file_copy', 'http_access'
+    pc_id: str
+    target_resource: Optional[str] = None
+    activity_details: Dict[str, Any] = field(default_factory=dict)
