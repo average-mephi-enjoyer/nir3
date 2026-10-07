@@ -97,32 +97,24 @@ Return ONLY a valid JSON object matching the provided JSON Schema. Every marker 
     def compute_markers(self, message: CommunicationMessage, context: EmployeeContext) -> MarkerVector:
         text = message.cleaned_body or message.body or ""
         sanitized_text = TextSanitizer.sanitize(text)
-
         vector = MarkerVector()
         vector.llm_uncertainty = 1.0
-
         if not sanitized_text or len(sanitized_text) < 10:
             return vector
-
         parsed_resp = self._call_api_sync(sanitized_text)
         if not parsed_resp:
             return vector
-
         vector.llm_uncertainty = 0.0
         scores: Dict[str, Tuple[float, float]] = {}
-
         for item in parsed_resp.markers:
             if item.marker_type not in scores or item.score > scores[item.marker_type][0]:
                 scores[item.marker_type] = (item.score, item.uncertainty)
-
         vector.llm_alienation = scores.get("organizational_alienation", (0.0, 0.0))[0]
         vector.llm_concealment = scores.get("concealment_intent", (0.0, 0.0))[0]
         vector.llm_rationalization = scores.get("rationalization", (0.0, 0.0))[0]
         vector.llm_access_focus = scores.get("access_exfiltration_focus", (0.0, 0.0))[0]
         vector.llm_conflict = scores.get("conflict_escalation", (0.0, 0.0))[0]
-
         if scores:
             mean_unc = sum(u for _, u in scores.values()) / len(scores)
             vector.llm_uncertainty = float(mean_unc)
-
         return vector
