@@ -17,7 +17,7 @@ class QuarantineObservation:
 
 
 class QuarantineBuffer:
-    """
+    r"""
     Quarantine buffer with a delay for admitting observations to the trusted profile strictly after 14 days.
     Implements the admission condition: max_{\tau \in [t - L, t]} Risk(\tau) < h_{quarantine}.
     If a risk spike >= h_{quarantine} is detected on the window [t - L, t],
@@ -85,7 +85,7 @@ class QuarantineBuffer:
 
     def get_operational_snapshot(self) -> List[QuarantineObservation]:
         """
-        Returns a snapshot of the current operational observations in the quarantine.
+        Returns a snapshot of the current operational observations in the quarantine buffer.
         """
         return list(self.buffer)
 
