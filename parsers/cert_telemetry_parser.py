@@ -1,7 +1,7 @@
 import csv
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterator, Optional
-
+import os
+from typing import Iterator, Optional
 from core.models import TelemetryEvent
 
 
@@ -31,11 +31,13 @@ class TelemetryLogProcessor:
             return dt.replace(tzinfo=timezone.utc)
         except ValueError:
             return None
-
+        
     def stream_logon_events(self, filepath: str) -> Iterator[TelemetryEvent]:
         """
         Stream events from CERT logon.csv (id, date, user, pc, activity).
         """
+        if not os.path.exists(filepath):
+            return
         with open(filepath, mode="r", encoding="utf-8", errors="replace") as f:
             reader = csv.DictReader(f)
             for row in reader:
@@ -59,6 +61,8 @@ class TelemetryLogProcessor:
         """
         Stream events from CERT device.csv (id, date, user, pc, activity).
         """
+        if not os.path.exists(filepath):
+            return
         with open(filepath, mode="r", encoding="utf-8", errors="replace") as f:
             reader = csv.DictReader(f)
             for row in reader:
@@ -81,4 +85,55 @@ class TelemetryLogProcessor:
     def stream_file_events(self, filepath: str) -> Iterator[TelemetryEvent]:
         """
         Stream events from CERT file.csv (id, date, user, pc, filename, content).
+        Guaranteed generator object.
         """
+        if not os.path.exists(filepath):
+            return
+        with open(filepath, mode="r", encoding="utf-8", errors="replace") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                ts = self.parse_timestamp(row.get("date"))
+                user = (row.get("user") or "").strip().lower()
+                if not ts or not user:
+                    continue
+                filename = (row.get("filename") or "").strip()
+                yield TelemetryEvent(
+                    event_id=(row.get("id") or "").strip(),
+                    user_id=user,
+                    timestamp=ts,
+                    event_type="file_transfer",
+                    pc_id=(row.get("pc") or "").strip(),
+                    target_resource=filename,
+                    activity_details={
+                        "filename": filename,
+                        "file_depth": filename.count("\\") + filename.count("/"),
+                        "has_content": bool(row.get("content"))
+                    }
+                )
+
+    def stream_http_events(self, filepath: str) -> Iterator[TelemetryEvent]:
+        """
+        Stream events from CERT http.csv (id, date, user, pc, url, content).
+        """
+        if not os.path.exists(filepath):
+            return
+        with open(filepath, mode="r", encoding="utf-8", errors="replace") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                ts = self.parse_timestamp(row.get("date"))
+                user = (row.get("user") or "").strip().lower()
+                if not ts or not user:
+                    continue
+                url = (row.get("url") or "").strip()
+                yield TelemetryEvent(
+                    event_id=(row.get("id") or "").strip(),
+                    user_id=user,
+                    timestamp=ts,
+                    event_type="http_access",
+                    pc_id=(row.get("pc") or "").strip(),
+                    target_resource=url,
+                    activity_details={
+                        "url": url,
+                        "has_content": bool(row.get("content"))
+                    }
+                )

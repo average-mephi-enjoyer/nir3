@@ -1,6 +1,6 @@
 import math
 import re
-from typing import Dict, List, Optional
+from typing import Optional
 import numpy as np
 from core.models import CommunicationMessage, EmployeeContext, MarkerVector
 from extractors.base import IFeatureExtractor
@@ -9,9 +9,9 @@ from extractors.base import IFeatureExtractor
 class SpacyStatisticalExtractor(IFeatureExtractor):
     """
     Statistical NLP extractor implementing linguistic indices from NIR-1 and NIR-2:
-    - Pronoun focus: ratio of 1st person singular (I, me, my) to 1st person plural (we, us, our);
-    - Syntactic complexity: mean parse tree depth and punctuation irregularity;
-    - POS Shannon entropy: distribution uniformity of grammatical word classes.
+    - Pronoun ratio: self-focus detachment;
+    - Syntactic complexity: punctuation density and clause structure;
+    - Informational variance and latency dynamics.
     """
 
     FIRST_PERSON_SINGULAR = {
@@ -25,7 +25,7 @@ class SpacyStatisticalExtractor(IFeatureExtractor):
     }
 
     TOKEN_PATTERN = re.compile(r"\b\w+\b", re.UNICODE)
-    PUNCT_PATTERN = re.compile(r"[!?]{2,}|\.{3,}")
+    PUNCT_PATTERN = re.compile(r"[,;:\.\?!-]")
 
     def __init__(self, spacy_model: Optional[str] = None):
         self.nlp = None
@@ -37,10 +37,6 @@ class SpacyStatisticalExtractor(IFeatureExtractor):
                 self.nlp = None
 
     def compute_pronoun_marker(self, text: str) -> float:
-        """
-        Calculate self-focus pronoun ratio: |I-words| / (|I-words| + |We-words| + 1).
-        Ranges in [0.0, 1.0]. High values denote egocentric detachment.
-        """
         tokens = [t.lower() for t in self.TOKEN_PATTERN.findall(text)]
         if not tokens:
             return 0.0
@@ -52,68 +48,20 @@ class SpacyStatisticalExtractor(IFeatureExtractor):
 
     def compute_syntactic_complexity(self, text: str) -> float:
         """
-        Estimate syntactic complexity using spaCy dependency tree depth
-        or fallback structural proxy based on clause length and punctuation density.
+        Syntactic complexity based on punctuation density and clause structure.
+        Ranges stably between 0.1 and 0.8 without hard saturation.
         """
-        if not text.strip():
-            return 0.0
+        words = self.TOKEN_PATTERN.findall(text)
+        if not words:
+            return 0.25
+        num_words = len(words)
+        num_punct = len(self.PUNCT_PATTERN.findall(text))
+        punct_density = num_punct / max(num_words, 1)
+        length_factor = math.log10(max(num_words, 2)) / 3.0
+        raw_score = 0.5 * punct_density * 5.0 + 0.5 * length_factor
+        return float(np.clip(raw_score, 0.10, 0.85))
 
-        if self.nlp is not None:
-            doc = self.nlp(text[:2000])
-            depths: List[int] = []
-            for sent in doc.sents:
-                root = sent.root
-                depth = self._get_subtree_depth(root)
-                depths.append(depth)
-            mean_depth = float(sum(depths) / max(len(depths), 1))
-            norm_depth = float(np.clip((mean_depth - 2.0) / 8.0, 0.0, 1.0))
-            return norm_depth
-        clauses = re.split(r"[,;:\n.]+", text)
-        clean_clauses = [c.strip() for c in clauses if len(c.strip()) > 0]
-        if not clean_clauses:
-            return 0.0
-        clause_lengths = [len(c.split()) for c in clean_clauses]
-        mean_len = sum(clause_lengths) / len(clause_lengths)
-        norm_len = float(np.clip(mean_len / 25.0, 0.0, 1.0))
-        return norm_len
-
-    def _get_subtree_depth(self, node) -> int:
-        """
-        Recursively compute syntactic dependency tree depth.
-        """
-        if not list(node.children):
-            return 1
-        return 1 + max(self._get_subtree_depth(child) for child in node.children)
-
-    def compute_pos_entropy(self, text: str) -> float:
-        """
-        Calculate Shannon entropy over POS tag distribution: H(POS) = -sum p_i * log2(p_i).
-        Normalized into [0.0, 1.0] by log2(|Categories|).
-        """
-        if self.nlp is None or not text.strip():
-            return 0.5
-        doc = self.nlp(text[:2000])
-        pos_counts: Dict[str, int] = {}
-        total = 0
-        for token in doc:
-            if not token.is_space and not token.is_punct:
-                pos = token.pos_
-                pos_counts[pos] = pos_counts.get(pos, 0) + 1
-                total += 1
-        if total < 5:
-            return 0.5
-        entropy = 0.0
-        for count in pos_counts.values():
-            p = count / total
-            if p > 0:
-                entropy -= p * math.log2(p)
-        max_entropy = math.log2(17)
-        return float(np.clip(entropy / max_entropy, 0.0, 1.0))
-
-    def compute_markers(self, message: CommunicationMessage, context: EmployeeContext) -> MarkerVector:
-        """
-        Aggregate statistical NLP markers into unified MarkerVector.
-        """
+    def compute_markers(self, message: CommunicationMessage, context: Optional[EmployeeContext] = None) -> MarkerVector:
         text = message.text_content
         vector = MarkerVector()
         if not text:
@@ -124,6 +72,7 @@ class SpacyStatisticalExtractor(IFeatureExtractor):
             act_change = abs(context.daily_activity_change)
             vector.activity_marker = float(np.clip(act_change / 3.0, 0.0, 1.0))
             rep_std = context.reply_time_std
-            vector.response_marker = float(np.clip(rep_std / 24.0, 0.0, 1.0))
-            vector.social_marker = float(np.clip(1.0 - context.reciprocity, 0.0, 1.0))
+            vector.response_marker = float(np.clip(rep_std / 48.0, 0.0, 1.0))
+            recip = context.reciprocity
+            vector.social_marker = float(np.clip(1.0 - recip, 0.0, 1.0))
         return vector

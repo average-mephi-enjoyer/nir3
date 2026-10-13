@@ -6,7 +6,7 @@ import networkx as nx
 
 class BenchmarkVisualizer:
     """
-    Renders high-resolution vector and raster plots for research reporting.
+    Renders publication-grade vector and raster plots for research reporting.
     """
     @staticmethod
     def plot_communication_graph(
@@ -18,9 +18,9 @@ class BenchmarkVisualizer:
         Visualize ego-network topology around target employee with edge weights.
         """
         os.makedirs(os.path.dirname(output_filepath), exist_ok=True)
-        plt.figure(figsize=(9, 8), dpi=300)
+        fig = plt.figure(figsize=(9, 8), dpi=300)
         if ego_graph.number_of_nodes() == 0:
-            plt.close()
+            plt.close(fig)
             return
         pos = nx.spring_layout(ego_graph, seed=42, k=0.8)
         node_colors = [
@@ -43,9 +43,9 @@ class BenchmarkVisualizer:
         nx.draw_networkx_labels(ego_graph, pos, font_size=8, font_family="sans-serif")
         plt.title(f"Dynamic Ego-Network for Subject: {target_user}", fontsize=12, fontweight="bold", pad=15)
         plt.axis("off")
-        plt.tight_layout()
-        plt.savefig(output_filepath, bbox_inches="tight")
-        plt.close()
+        fig.tight_layout()
+        fig.savefig(output_filepath, bbox_inches="tight")
+        plt.close(fig)
 
     @staticmethod
     def plot_top_markers_dynamics(
@@ -64,10 +64,15 @@ class BenchmarkVisualizer:
         valid_markers = [m for m in top_markers if m in marker_histories]
         if not valid_markers:
             return
-        fig, axes = plt.subplots(nrows=len(valid_markers), ncols=1, figsize=(10, 2.8 * len(valid_markers)), dpi=300, sharex=True)
-        if len(valid_markers) == 1:
-            axes = [axes]
-        for ax, marker_name in zip(axes, valid_markers):
+        fig, axes = plt.subplots(
+            nrows=len(valid_markers),
+            ncols=1,
+            figsize=(10, 2.8 * len(valid_markers)),
+            dpi=300,
+            sharex=True
+        )
+        axes_list = [axes] if len(valid_markers) == 1 else list(axes)
+        for ax, marker_name in zip(axes_list, valid_markers):
             obs_vals = marker_histories[marker_name]
             base_vals = baseline_histories.get(marker_name, [0.0] * len(obs_vals))
             ax.plot(time_steps, obs_vals, label="Observed Signal", color="navy", alpha=0.65, linewidth=1.2)
@@ -76,10 +81,92 @@ class BenchmarkVisualizer:
             ax.set_ylabel("Intensity", fontsize=9)
             ax.grid(True, linestyle=":", alpha=0.5)
             ax.legend(loc="upper left", fontsize=8)
-        plt.xlabel("Observation Timeline (Days)", fontsize=10)
-        plt.tight_layout()
-        plt.savefig(output_filepath, bbox_inches="tight")
-        plt.close()
+        axes_list[-1].set_xlabel("Observation Timeline (Days)", fontsize=10)
+        fig.tight_layout()
+        fig.savefig(output_filepath, bbox_inches="tight")
+        plt.close(fig)
+
+    @staticmethod
+    def plot_multi_marker_dynamics(
+        time_steps: List[int],
+        marker_histories: Dict[str, List[float]],
+        trusted_baseline_histories: Dict[str, List[float]],
+        output_filepath: str = "output/multi_marker_dynamics.png"
+    ) -> None:
+        """
+        Plot individual tracking trajectories across all tracked markers.
+        """
+        os.makedirs(os.path.dirname(output_filepath), exist_ok=True)
+        tracked_keys = list(marker_histories.keys())
+        num_markers = len(tracked_keys)
+        if num_markers == 0:
+            return
+        nrows = (num_markers + 1) // 2
+        fig, axes = plt.subplots(
+            nrows=nrows,
+            ncols=2,
+            figsize=(14, 3 * nrows),
+            dpi=300,
+            sharex=True
+        )
+        axes_flat = axes.flatten()
+        for idx, key in enumerate(tracked_keys):
+            ax = axes_flat[idx]
+            observed_vals = marker_histories[key]
+            baseline_vals = trusted_baseline_histories.get(key, [0.0] * len(observed_vals))
+            ax.plot(time_steps, observed_vals, label="Observed Value", color="royalblue", alpha=0.7, linewidth=1.2)
+            ax.plot(time_steps, baseline_vals, label="Trusted Baseline", color="forestgreen", linewidth=2.0)
+            ax.set_title(f"Marker: {key}", fontsize=10, fontweight="bold")
+            ax.set_ylabel("Intensity", fontsize=9)
+            ax.grid(True, linestyle=":", alpha=0.5)
+            ax.legend(loc="upper left", fontsize=8)
+        for idx in range(num_markers, len(axes_flat)):
+            fig.delaxes(axes_flat[idx])
+        fig.text(0.5, 0.01, "Observation Timeline (Days)", ha="center", fontsize=10)
+        fig.tight_layout()
+        fig.savefig(output_filepath, bbox_inches="tight")
+        plt.close(fig)
+
+    @staticmethod
+    def plot_all_markers_grid(
+        time_steps: List[int],
+        marker_histories: Dict[str, List[float]],
+        baseline_histories: Dict[str, List[float]],
+        output_filepath: str = "output/cert_all_markers.png"
+    ) -> None:
+        """
+        Render publication-grade 5x2 subplot grid covering all 10 tracked psycholinguistic markers.
+        """
+        os.makedirs(os.path.dirname(output_filepath), exist_ok=True)
+        tracked_keys = list(marker_histories.keys())
+        num_markers = len(tracked_keys)
+        if num_markers == 0:
+            return
+        nrows = (num_markers + 1) // 2
+        fig, axes = plt.subplots(
+            nrows=nrows,
+            ncols=2,
+            figsize=(15, 3.2 * nrows),
+            dpi=300,
+            sharex=True
+        )
+        axes_flat = axes.flatten()
+        for idx, key in enumerate(tracked_keys):
+            ax = axes_flat[idx]
+            obs_vals = marker_histories[key]
+            base_vals = baseline_histories.get(key, [0.0] * len(obs_vals))
+            ax.plot(time_steps, obs_vals, label="Observed Signal (Individual Message)", color="royalblue", alpha=0.55, linewidth=1.0)
+            ax.plot(time_steps, base_vals, label="Trusted Baseline Norm", color="darkgreen", linewidth=2.0)
+            ax.set_title(f"Marker: {key}", fontsize=10, fontweight="bold")
+            ax.set_ylabel("Intensity", fontsize=9)
+            ax.grid(True, linestyle=":", alpha=0.5)
+            ax.legend(loc="upper left", fontsize=8)
+        for idx in range(num_markers, len(axes_flat)):
+            fig.delaxes(axes_flat[idx])
+        fig.text(0.5, 0.01, "Observation Steps (Analyzed Sent Emails)", ha="center", fontsize=11, fontweight="bold")
+        fig.tight_layout()
+        fig.savefig(output_filepath, bbox_inches="tight")
+        plt.close(fig)
 
     @staticmethod
     def plot_ramp_drift_comparison(
@@ -118,6 +205,6 @@ class BenchmarkVisualizer:
         ax2.set_ylabel("Risk Score / Threshold", fontsize=10)
         ax2.grid(True, linestyle=":", alpha=0.6)
         ax2.legend(loc="upper left", fontsize=9)
-        plt.tight_layout()
-        plt.savefig(output_filepath, bbox_inches="tight")
-        plt.close()
+        fig.tight_layout()
+        fig.savefig(output_filepath, bbox_inches="tight")
+        plt.close(fig)

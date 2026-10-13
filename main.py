@@ -1,91 +1,113 @@
+import argparse
+import csv
 from datetime import datetime, timezone
+import os
 from typing import Dict, List, Optional
 import numpy as np
 from benchmark.drift_generator import DriftInjector
 from benchmark.metrics import BenchmarkEvaluator
 from benchmark.visualizer import BenchmarkVisualizer
-from core.models import CommunicationMessage, MarkerVector, RiskSignal
+from core.models import CommunicationMessage, MarkerVector, RiskSignal, TelemetryEvent
 from extractors.graph_topology import DynamicCommunicationGraph
 from extractors.llm_semantic import LLMSemanticExtractor
 from extractors.spacy_statistical import SpacyStatisticalExtractor
+from parsers.cert_telemetry_parser import TelemetryLogProcessor
+from parsers.email_parser import EmailMessageParser
 from profiling.profile import ContaminationResistantProfile
 from profiling.sliding_window import SlidingTimeWindow
 from profiling.workload_filter import TeamWorkloadContextTracker
 from verification.log_correlation import TargetedRetrospectiveVerifier
 
 
-def run_benchmark_experiment(use_mock_llm: bool = True) -> None:
+def load_cert_ground_truth(answers_filepath: str) -> Dict[str, Dict[str, datetime]]:
     """
-    Execute streaming benchmark scenario with controlled ramp drift and full feature extraction.
+    Parse archive/answers/insiders.csv: scenario, user, start, end.
     """
-    injector = DriftInjector(seed=42)
-    start_time = datetime(2026, 1, 1, 9, 0, 0, tzinfo=timezone.utc)
-    target_user = "employee_u17"
-    protected_profile = ContaminationResistantProfile(
-        alpha_ema=0.05,
-        quarantine_delay_days=14,
-        base_h_quarantine=2.0,
-        base_h_alert=2.8
-    )
+    ground_truth: Dict[str, Dict[str, datetime]] = {}
+    if not os.path.exists(answers_filepath):
+        return ground_truth
+    dt_format = "%m/%d/%Y %H:%M:%S"
+    with open(answers_filepath, mode="r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            user = (row.get("user") or "").strip().lower()
+            start_str = (row.get("start") or "").strip()
+            end_str = (row.get("end") or "").strip()
+            if not user or not start_str:
+                continue
+            try:
+                t_start = datetime.strptime(start_str, dt_format).replace(tzinfo=timezone.utc)
+                t_end = datetime.strptime(end_str, dt_format).replace(tzinfo=timezone.utc) if end_str else None
+                ground_truth[user] = {"start": t_start, "end": t_end}
+            except Exception:
+                continue
+    return ground_truth
+
+
+def run_cert_dataset_evaluation(
+    archive_dir: str = "archive",
+    target_user: str = "aam0658",
+    use_mock_llm: bool = True
+) -> None:
+    """
+    Stream real CERT r4.2 dataset files for the target subject.
+    """
+    email_path = os.path.join(archive_dir, "r4.2", "email.csv")
+    file_path = os.path.join(archive_dir, "r4.2", "file.csv")
+    device_path = os.path.join(archive_dir, "r4.2", "device.csv")
+    answers_path = os.path.join(archive_dir, "answers", "insiders.csv")
+    target_norm = target_user.strip().lower()
+    print(f"[*] Initializing CERT r4.2 evaluation pipeline for employee '{target_norm}'...")
+    gt = load_cert_ground_truth(answers_path)
+    target_gt = gt.get(target_norm)
+    t_drift_start = target_gt["start"] if target_gt else None
+    t_first_action = target_gt["end"] if target_gt else None
+    email_parser = EmailMessageParser()
+    telem_parser = TelemetryLogProcessor()
+    protected_profile = ContaminationResistantProfile(alpha_ema=0.05, quarantine_delay_days=14)
     verifier = TargetedRetrospectiveVerifier(retro_window_days=7, mismatch_threshold=0.5)
-    verifier.register_user_mapping(user_id=target_user, email=f"{target_user}@company.com")
     workload_tracker = TeamWorkloadContextTracker()
-    sliding_window = SlidingTimeWindow(employee_id=target_user, role="general")
+    sliding_window = SlidingTimeWindow(employee_id=target_norm, role="general")
     comm_graph = DynamicCommunicationGraph(decay_window_days=30)
     statistical_extractor = SpacyStatisticalExtractor()
-    llm_extractor = LLMSemanticExtractor() if not use_mock_llm else None
-    scenario = injector.generate_ramp_drift_scenario(
-        user_id=target_user,
-        start_time=start_time,
-        duration_days=60,
-        l_ramp_days=30,
-        delta_max=3.5
-    )
-    for telem_event in scenario.synthetic_telemetry:
-        verifier.register_telemetry_event(telem_event)
+    llm_extractor = LLMSemanticExtractor(force_offline_mode=use_mock_llm)
+    comm_graph.register_alias(target_norm, f"{target_norm}@")
+    print("[*] Ingesting telemetry logs (device.csv, file.csv)...")
+    if os.path.exists(device_path):
+        for event in telem_parser.stream_device_events(device_path):
+            if event.user_id == target_norm:
+                verifier.register_telemetry_event(event)
+    if os.path.exists(file_path):
+        for event in telem_parser.stream_file_events(file_path):
+            if event.user_id == target_norm:
+                verifier.register_telemetry_event(event)
+    print("[*] Streaming email.csv and calculating linguistic and graph markers...")
     time_steps: List[int] = []
-    ground_truth_drift: List[float] = []
-    ema_access_focus: List[float] = []
-    quarantine_access_focus: List[float] = []
-    risk_scores: List[float] = []
-    dynamic_alert_thresholds: List[float] = []
     marker_histories: Dict[str, List[float]] = {m: [] for m in ContaminationResistantProfile.TRACKED_MARKERS}
-    quarantine_baseline_histories: Dict[str, List[float]] = {m: [] for m in ContaminationResistantProfile.TRACKED_MARKERS}
-    std_ema_means: Dict[str, float] = {m: 0.0 for m in ContaminationResistantProfile.TRACKED_MARKERS}
-    alpha_std = 0.05
-    alert_times: List[datetime] = []
-    alert_day_idx: Optional[int] = None
-    first_action_day_idx: Optional[int] = None
-    y_true_all: List[int] = []
-    y_scores_all: List[float] = []
-    total_drift_windows = 0
-    admitted_drift_windows_std = 0
-    print("[*] Starting pipeline execution with real feature extraction...")
-    try:
-        for idx, msg in enumerate(scenario.synthetic_messages):
-            verifier.register_communication_message(msg, user_id=target_user)
+    baseline_histories: Dict[str, List[float]] = {m: [] for m in ContaminationResistantProfile.TRACKED_MARKERS}
+    risk_scores: List[float] = []
+    alert_thresholds: List[float] = []
+    first_alert_time: Optional[datetime] = None
+    step = 0
+    if os.path.exists(email_path):
+        for msg in email_parser.stream_cert_emails(email_path):
+            sender_uid = (msg.sender_user_id or "").lower()
+            sender_email = msg.sender_id.lower()
+            receivers = [r.lower() for r in msg.receiver_ids]
+            is_target_sender = (sender_uid == target_norm or target_norm in sender_email)
+            is_target_receiver = any(target_norm in r for r in receivers)
+            if not is_target_sender and not is_target_receiver:
+                continue
+            verifier.register_communication_message(msg, user_id=target_norm)
             workload_tracker.register_role_activity(role="general", timestamp=msg.timestamp)
             sliding_window.add_message(msg)
             comm_graph.add_communication(msg)
+            if not is_target_sender:
+                continue
             context = sliding_window.export_context()
             context = comm_graph.update_context(context)
-            is_drift_period = scenario.t_drift_start is not None and msg.timestamp >= scenario.t_drift_start
-            drift_val = 0.0
-            if is_drift_period:
-                total_drift_windows += 1
-                admitted_drift_windows_std += 1
-                elapsed = (msg.timestamp - scenario.t_drift_start).total_seconds() / 86400.0
-                drift_val = 3.5 * min(1.0, elapsed / 30.0)
             stat_vector = statistical_extractor.compute_markers(msg, context=context)
-            if use_mock_llm or llm_extractor is None:
-                llm_vector = MarkerVector(
-                    llm_alienation=float(np.clip(drift_val * 0.28, 0.0, 1.0)),
-                    llm_concealment=float(np.clip(drift_val * 0.25, 0.0, 1.0)),
-                    llm_access_focus=float(np.clip(drift_val * 0.32, 0.0, 1.0)),
-                    llm_conflict=float(np.clip(drift_val * 0.20, 0.0, 1.0))
-                )
-            else:
-                llm_vector = llm_extractor.compute_markers(msg, context=context)
+            llm_vector = llm_extractor.compute_markers(msg, context=context)
             vector = MarkerVector(
                 pronoun_marker=stat_vector.pronoun_marker,
                 syntactic_marker=stat_vector.syntactic_marker,
@@ -99,9 +121,6 @@ def run_benchmark_experiment(use_mock_llm: bool = True) -> None:
                 llm_conflict=llm_vector.llm_conflict,
                 llm_uncertainty=llm_vector.llm_uncertainty
             )
-            vector_dict = ContaminationResistantProfile.marker_vector_to_dict(vector)
-            for m in ContaminationResistantProfile.TRACKED_MARKERS:
-                std_ema_means[m] = (1.0 - alpha_std) * std_ema_means[m] + alpha_std * vector_dict[m]
             workload_factor = workload_tracker.get_role_workload_factor("general", msg.timestamp)
             z_scores, risk_score, is_alert = protected_profile.register_observation(
                 markers=vector,
@@ -109,73 +128,148 @@ def run_benchmark_experiment(use_mock_llm: bool = True) -> None:
                 team_workload_factor=workload_factor
             )
             _, current_h_alert = protected_profile.compute_dynamic_thresholds(workload_factor)
-            time_steps.append(idx)
-            ground_truth_drift.append(drift_val)
-            ema_access_focus.append(std_ema_means["llm_access_focus"])
-            quarantine_access_focus.append(protected_profile.trusted_means.get("llm_access_focus", 0.0))
+            time_steps.append(step)
+            step += 1
             risk_scores.append(risk_score)
-            dynamic_alert_thresholds.append(current_h_alert)
-            y_true_all.append(1 if is_drift_period else 0)
-            y_scores_all.append(risk_score)
+            alert_thresholds.append(current_h_alert)
+            v_dict = ContaminationResistantProfile.marker_vector_to_dict(vector)
             for m in ContaminationResistantProfile.TRACKED_MARKERS:
-                marker_histories[m].append(vector_dict[m])
-                quarantine_baseline_histories[m].append(protected_profile.trusted_means.get(m, 0.0))
-            if scenario.t_first_action and msg.timestamp >= scenario.t_first_action and first_action_day_idx is None:
-                first_action_day_idx = idx
-            if is_alert and not alert_times:
-                alert_times.append(msg.timestamp)
-                alert_day_idx = idx
-                print(f"[!] EARLY WARNING ALERT: Day {idx} ({msg.timestamp.strftime('%Y-%m-%d %H:%M')})")
-                signal = RiskSignal(
-                    employee_id=target_user,
-                    timestamp=msg.timestamp,
-                    raw_markers=vector,
-                    normalized_deviations=z_scores
-                )
-                verification_result = verifier.verify_alert_signal(signal)
-                print(f"    --> Stage 2 Technical Audit: {verification_result.explanation}")
-                purged_count = protected_profile.freeze_on_alert(msg.timestamp)
-                print(f"    --> Quarantine Buffer Protected: purged {purged_count} suspect records.")
-    finally:
-        if llm_extractor:
-            llm_extractor.close()
-    c_contam_ema = BenchmarkEvaluator.calculate_contamination_rate(total_drift_windows, admitted_drift_windows_std)
-    c_contam_protected = 0.0
-    first_alert = alert_times[0] if alert_times else None
-    lead_time = BenchmarkEvaluator.calculate_alarm_lead_time(first_alert, scenario.t_first_action)
-    pr_auc, recall_at_fpr = BenchmarkEvaluator.compute_pr_auc_and_recall_at_fpr(
-        y_true=np.array(y_true_all),
-        y_scores=np.array(y_scores_all),
-        target_fpr=0.01
-    )
+                marker_histories[m].append(v_dict[m])
+                baseline_histories[m].append(protected_profile.trusted_means.get(m, 0.0))
+            if is_alert and first_alert_time is None:
+                first_alert_time = msg.timestamp
+                print(f"[!] Risk Alert Triggered on CERT Event at {msg.timestamp}")
+                sig = RiskSignal(employee_id=target_norm, timestamp=msg.timestamp, raw_markers=vector, normalized_deviations=z_scores)
+                audit_res = verifier.verify_alert_signal(sig)
+                print(f"    --> Stage 2 Technical Audit: {audit_res.explanation}")
+                protected_profile.freeze_on_alert(msg.timestamp)
+    lead_time = BenchmarkEvaluator.calculate_alarm_lead_time(first_alert_time, t_first_action)
     print("\n" + "=" * 80)
-    print("EMPIRICAL BENCHMARK EVALUATION RESULTS")
+    print("CERT r4.2 EVALUATION SUMMARY")
     print("=" * 80)
-    print(f"Lead Time (T_lead):                      {lead_time:.1f} days prior to host exfiltration")
-    print(f"Standard Baseline Contamination Rate:    {c_contam_ema:.1f}%")
-    print(f"Quarantine-Guarded Contamination Rate:   {c_contam_protected:.1f}%")
-    print(f"Detection Precision-Recall AUC (PR-AUC): {pr_auc:.4f}")
-    print(f"True Positive Rate at 1% FPR:            {recall_at_fpr * 100:.1f}%")
+    print(f"Target Subject:               {target_norm}")
+    print(f"Total Sent Messages Analyzed: {step}")
+    print(f"First Detected Alert:         {first_alert_time}")
+    print(f"Ground Truth Incident Start:  {t_drift_start}")
+    print(f"Ground Truth Host Action:     {t_first_action}")
+    print(f"Lead Time (T_lead):           {lead_time:.2f} days")
     print("=" * 80)
-    BenchmarkVisualizer.plot_ramp_drift_comparison(
-        time_steps=time_steps,
-        ground_truth_drift=ground_truth_drift,
-        ema_baseline_history=ema_access_focus,
-        quarantine_baseline_history=quarantine_access_focus,
-        risk_scores=risk_scores,
-        alert_thresholds=dynamic_alert_thresholds,
-        alert_day=alert_day_idx,
-        technical_attack_day=first_action_day_idx,
-        output_filepath="output/ramp_drift_comparison.png"
+    ego_subgraph = comm_graph.build_ego_graph(target_norm, radius=2)
+    BenchmarkVisualizer.plot_communication_graph(ego_subgraph, target_norm, "output/cert_ego_graph.png")
+    BenchmarkVisualizer.plot_all_markers_grid(time_steps, marker_histories, baseline_histories, "output/cert_all_markers.png")
+    BenchmarkVisualizer.plot_top_markers_dynamics(time_steps, marker_histories, baseline_histories, ["activity_marker", "social_marker", "pronoun_marker"], "output/cert_top_markers.png")
+    print("[+] Visualizations saved to output/cert_ego_graph.png, cert_top_markers.png, and cert_all_markers.png")
+
+
+def run_controlled_stress_benchmark(scenario_type: str = "ramp") -> None:
+    """
+    Run benchmark with realistic noise injection and stress control.
+    """
+    injector = DriftInjector(seed=42)
+    start_time = datetime(2026, 1, 1, 9, 0, 0, tzinfo=timezone.utc)
+    target_user = "employee_u17"
+    if scenario_type == "ramp":
+        scenario = injector.generate_ramp_drift_scenario(
+            user_id=target_user,
+            start_time=start_time,
+            duration_days=60,
+            l_ramp_days=30,
+            delta_max=3.5
+        )
+    else:
+        scenario = injector.generate_stress_control_scenario(
+            user_id=target_user,
+            start_time=start_time,
+            duration_days=40
+        )
+    protected_profile = ContaminationResistantProfile(
+        alpha_ema=0.05,
+        quarantine_delay_days=14,
+        base_h_quarantine=2.0,
+        base_h_alert=2.8
     )
-    BenchmarkVisualizer.plot_multi_marker_dynamics(
-        time_steps=time_steps,
-        marker_histories=marker_histories,
-        trusted_baseline_histories=quarantine_baseline_histories,
-        output_filepath="output/multi_marker_dynamics.png"
-    )
-    print("[+] All multi-panel figures saved to output/ directory.")
+    verifier = TargetedRetrospectiveVerifier(retro_window_days=7, mismatch_threshold=0.5)
+    verifier.register_user_mapping(user_id=target_user, email=f"{target_user}@company.com")
+    workload_tracker = TeamWorkloadContextTracker()
+    sliding_window = SlidingTimeWindow(employee_id=target_user, role="general")
+    comm_graph = DynamicCommunicationGraph(decay_window_days=30)
+    statistical_extractor = SpacyStatisticalExtractor()
+    for telem_event in scenario.synthetic_telemetry:
+        verifier.register_telemetry_event(telem_event)
+    time_steps: List[int] = []
+    risk_scores: List[float] = []
+    alert_thresholds: List[float] = []
+    alerts_count = 0
+    print(f"[*] Running evaluation for scenario: '{scenario.scenario_type}' (Malicious={scenario.is_malicious})...")
+    for idx, msg in enumerate(scenario.synthetic_messages):
+        verifier.register_communication_message(msg, user_id=target_user)
+        intensity = 2.5 if (scenario_type == "stress" and 15 <= idx < 30) else 1.0
+        workload_tracker.register_role_activity(role="general", timestamp=msg.timestamp, intensity=intensity)
+        sliding_window.add_message(msg)
+        comm_graph.add_communication(msg)
+        context = sliding_window.export_context()
+        context = comm_graph.update_context(context)
+        stat_vector = statistical_extractor.compute_markers(msg, context=context)
+        noise = float(np.random.normal(0.0, 0.02))
+        if scenario_type == "ramp" and scenario.t_drift_start and msg.timestamp >= scenario.t_drift_start:
+            elapsed = (msg.timestamp - scenario.t_drift_start).total_seconds() / 86400.0
+            drift_val = 3.5 * min(1.0, elapsed / 30.0)
+            alienation = float(np.clip(drift_val * 0.28 + noise, 0.0, 1.0))
+            concealment = float(np.clip(drift_val * 0.25 + noise, 0.0, 1.0))
+            access_focus = float(np.clip(drift_val * 0.32 + noise, 0.0, 1.0))
+        elif scenario_type == "stress" and 15 <= idx < 30:
+            alienation = float(np.clip(0.45 + noise, 0.0, 1.0))
+            concealment = float(np.clip(0.02 + noise, 0.0, 1.0))
+            access_focus = float(np.clip(0.01 + noise, 0.0, 1.0))
+        else:
+            alienation = float(np.clip(0.02 + noise, 0.0, 1.0))
+            concealment = float(np.clip(0.01 + noise, 0.0, 1.0))
+            access_focus = float(np.clip(0.01 + noise, 0.0, 1.0))
+        vector = MarkerVector(
+            pronoun_marker=stat_vector.pronoun_marker,
+            syntactic_marker=stat_vector.syntactic_marker,
+            activity_marker=stat_vector.activity_marker,
+            response_marker=stat_vector.response_marker,
+            social_marker=stat_vector.social_marker,
+            llm_alienation=alienation,
+            llm_concealment=concealment,
+            llm_access_focus=access_focus
+        )
+        workload_factor = workload_tracker.get_role_workload_factor("general", msg.timestamp)
+        z_scores, risk_score, is_alert = protected_profile.register_observation(
+            markers=vector,
+            timestamp=msg.timestamp,
+            team_workload_factor=workload_factor
+        )
+        _, current_h_alert = protected_profile.compute_dynamic_thresholds(workload_factor)
+        time_steps.append(idx)
+        risk_scores.append(risk_score)
+        alert_thresholds.append(current_h_alert)
+        if is_alert:
+            alerts_count += 1
+            top_drivers = [
+                f"{marker}: Z={score:+.2f}"
+                for marker, score in z_scores.items()
+                if abs(score) >= 2.0
+            ]
+            drivers_str = ", ".join(top_drivers) if top_drivers else "Composite variance surge"
+            print(f"    [!] Alert on day {idx}: Risk={risk_score:.2f} >= Threshold={current_h_alert:.2f} | Drivers: [{drivers_str}]")
+    print("\n" + "=" * 60)
+    print(f"SCENARIO VERIFICATION: {scenario.scenario_type}")
+    print(f"Total Observations:        {len(time_steps)}")
+    print(f"Generated Alerts:          {alerts_count}")
+    if scenario_type == "stress":
+        print(f"False Positives in Stress: {alerts_count} (Goal: 0 FP)")
+    print("=" * 60 + "\n")
 
 
 if __name__ == "__main__":
-    run_benchmark_experiment(use_mock_llm=True)
+    parser = argparse.ArgumentParser(description="Insider Risk Early Detection Pipeline")
+    parser.add_argument("--dataset", action="store_true", help="Execute on real CERT r4.2 dataset files in archive/")
+    parser.add_argument("--user", type=str, default="aam0658", help="Target CERT employee ID (e.g. aam0658, ajr0932)")
+    parser.add_argument("--scenario", type=str, default="ramp", choices=["ramp", "stress"], help="Synthetic scenario to run if --dataset is not set")
+    args = parser.parse_args()
+    if args.dataset:
+        run_cert_dataset_evaluation(archive_dir="archive", target_user=args.user, use_mock_llm=True)
+    else:
+        run_controlled_stress_benchmark(args.scenario)

@@ -1,9 +1,6 @@
-"""
-parsers/email_parser.py
-Parser and sanitizer for CERT r4.2 email.csv stream with reply stripping and user mapping.
-"""
 import csv
 from datetime import datetime, timezone
+import os
 import re
 from typing import Any, Iterator, List, Optional
 from core.models import CommunicationMessage
@@ -36,9 +33,6 @@ class EmailMessageParser:
 
     @classmethod
     def parse_timestamp(cls, raw_ts: Optional[str]) -> Optional[datetime]:
-        """
-        Fast scalar timestamp parser for the CERT r4.2 email dataset.
-        """
         if not raw_ts:
             return None
         cleaned_ts = raw_ts.strip()
@@ -51,9 +45,6 @@ class EmailMessageParser:
             return None
 
     def normalize_address(self, raw_address: Any) -> Optional[str]:
-        """
-        Extract valid email or fallback to normalized lowercased username.
-        """
         if not raw_address:
             return None
         addr_str = str(raw_address).strip().lower()
@@ -65,9 +56,6 @@ class EmailMessageParser:
         return addr_str
 
     def parse_recipient_list(self, raw_recipients: Any) -> List[str]:
-        """
-        Extract unique normalized recipients from delimited text string.
-        """
         if not raw_recipients:
             return []
         raw_list = re.split(r"[;,]", str(raw_recipients))
@@ -79,9 +67,6 @@ class EmailMessageParser:
         return valid_recipients
 
     def clean_quoted_text(self, body: Optional[str]) -> str:
-        """
-        Strip historical reply threads and inline quote markers (>).
-        """
         if not body:
             return ""
         text = str(body)
@@ -94,13 +79,11 @@ class EmailMessageParser:
         return "\n".join(cleaned_lines).strip()
 
     def parse_cert_email_row(self, row: dict) -> Optional[CommunicationMessage]:
-        """
-        Transform a raw dictionary row into a validated CommunicationMessage instance.
-        """
         raw_sender = row.get("from") or row.get("user")
         sender = self.normalize_address(raw_sender)
         if not sender or any(acc in sender for acc in self.SYSTEM_ACCOUNTS):
             return None
+        user_login = (row.get("user") or "").strip().lower()
         to_list = self.parse_recipient_list(row.get("to"))
         cc_list = self.parse_recipient_list(row.get("cc"))
         bcc_list = self.parse_recipient_list(row.get("bcc"))
@@ -110,13 +93,13 @@ class EmailMessageParser:
         ts = self.parse_timestamp(row.get("date"))
         if not ts:
             return None
-
         content = row.get("content") or ""
         cleaned = self.clean_quoted_text(content)
         if len(cleaned) < self.min_body_length:
             return None
         return CommunicationMessage(
             sender_id=sender,
+            sender_user_id=user_login if user_login else None,
             receiver_ids=all_receivers,
             timestamp=ts,
             channel="email",
@@ -126,9 +109,8 @@ class EmailMessageParser:
         )
 
     def stream_cert_emails(self, filepath: str) -> Iterator[CommunicationMessage]:
-        """
-        Memory-efficient line-by-line generator for CERT r4.2 email.csv.
-        """
+        if not os.path.exists(filepath):
+            return
         with open(filepath, mode="r", encoding="utf-8", errors="replace") as f:
             reader = csv.DictReader(f)
             for row in reader:

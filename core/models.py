@@ -6,10 +6,11 @@ import numpy as np
 
 @dataclass(slots=True)
 class CommunicationMessage:
-    """Corporative communication event"""
+    """Communication event with sender email and optional user_id."""
     sender_id: str
     receiver_ids: List[str]
     timestamp: datetime
+    sender_user_id: Optional[str] = None
     channel: str = "email"
     subject: Optional[str] = None
     body: Optional[str] = None
@@ -26,7 +27,7 @@ class CommunicationMessage:
 
 @dataclass(slots=True)
 class EmployeeContext:
-    """Operational & graph context."""
+    """Operational and graph-based context of an employee within the observation window."""
     employee_id: str
     role: str = "general"
     indegree: float = 0.0
@@ -44,9 +45,7 @@ class EmployeeContext:
 
 @dataclass(slots=True)
 class MarkerVector:
-    """
-    Unified markers vector.
-    """
+    """Combined feature vector (statistical NLP + LLM)."""
     pronoun_marker: float = 0.0
     syntactic_marker: float = 0.0
     activity_marker: float = 0.0
@@ -60,7 +59,6 @@ class MarkerVector:
     llm_uncertainty: float = 1.0
 
     def to_numpy(self) -> np.ndarray:
-        """Vectorisation"""
         return np.array([
             self.pronoun_marker,
             self.syntactic_marker,
@@ -86,7 +84,7 @@ class MarkerVector:
 
 @dataclass(slots=True)
 class RiskSignal:
-    """Output signal."""
+    """Early warning signal output."""
     employee_id: str
     timestamp: datetime
     raw_markers: MarkerVector
@@ -98,7 +96,7 @@ class RiskSignal:
 
 @dataclass(slots=True)
 class TelemetryEvent:
-    """Telemetry event."""
+    """System telemetry event (CERT r4.2: logon, device, file, http)."""
     event_id: str
     user_id: str
     timestamp: datetime
