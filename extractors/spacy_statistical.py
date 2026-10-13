@@ -7,13 +7,6 @@ from extractors.base import IFeatureExtractor
 
 
 class SpacyStatisticalExtractor(IFeatureExtractor):
-    """
-    Statistical NLP extractor implementing linguistic indices from NIR-1 and NIR-2:
-    - Pronoun ratio: self-focus detachment;
-    - Syntactic complexity: punctuation density and clause structure;
-    - Informational variance and latency dynamics.
-    """
-
     FIRST_PERSON_SINGULAR = {
         "i", "me", "my", "mine", "myself",
         "я", "меня", "мне", "мной", "мною", "мой", "моя", "мое", "мои"
@@ -47,10 +40,6 @@ class SpacyStatisticalExtractor(IFeatureExtractor):
         return float(i_count / (i_count + we_count + 1.0))
 
     def compute_syntactic_complexity(self, text: str) -> float:
-        """
-        Syntactic complexity based on punctuation density and clause structure.
-        Ranges stably between 0.1 and 0.8 without hard saturation.
-        """
         words = self.TOKEN_PATTERN.findall(text)
         if not words:
             return 0.25
@@ -72,7 +61,8 @@ class SpacyStatisticalExtractor(IFeatureExtractor):
             act_change = abs(context.daily_activity_change)
             vector.activity_marker = float(np.clip(act_change / 3.0, 0.0, 1.0))
             rep_std = context.reply_time_std
-            vector.response_marker = float(np.clip(rep_std / 48.0, 0.0, 1.0))
-            recip = context.reciprocity
-            vector.social_marker = float(np.clip(1.0 - recip, 0.0, 1.0))
+            vector.response_marker = float(np.clip(rep_std / 24.0, 0.05, 0.95))
+            out_deg = context.outdegree
+            social_isolation = 1.0 / (1.0 + math.log1p(max(out_deg, 0.0)))
+            vector.social_marker = float(np.clip(social_isolation, 0.10, 0.90))
         return vector

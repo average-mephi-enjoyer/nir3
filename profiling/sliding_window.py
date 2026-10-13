@@ -13,8 +13,8 @@ class SlidingTimeWindow:
         self.queue_7d: Deque[Tuple[datetime, str, str]] = deque()
         self.queue_30d: Deque[Tuple[datetime, str, str]] = deque()
         self.queue_90d: Deque[Tuple[datetime, str, str]] = deque()
-        self.pending_inbox: Deque[Tuple[datetime, str]] = deque()
-        self.reply_latencies_hours: Deque[Tuple[datetime, float]] = deque()
+        self.last_sent_ts: Optional[datetime] = None
+        self.inter_message_latencies_hours: Deque[Tuple[datetime, float]] = deque()
 
     def add_message(self, message: CommunicationMessage) -> None:
         ts = message.timestamp
@@ -28,29 +28,18 @@ class SlidingTimeWindow:
                 self.queue_7d.append(event)
                 self.queue_30d.append(event)
                 self.queue_90d.append(event)
-            self._resolve_replies(ts)
+            if self.last_sent_ts is not None and ts > self.last_sent_ts:
+                latency = (ts - self.last_sent_ts).total_seconds() / 3600.0
+                if 0.01 <= latency <= 168.0:
+                    self.inter_message_latencies_hours.append((ts, latency))
+            self.last_sent_ts = ts
         else:
             event = (ts, "received", sender_email)
             self.queue_1d.append(event)
             self.queue_7d.append(event)
             self.queue_30d.append(event)
             self.queue_90d.append(event)
-            self.pending_inbox.append((ts, sender_email))
         self._evict_expired(ts)
-
-    def _resolve_replies(self, sent_ts: datetime) -> None:
-        matched = False
-        remaining_inbox: Deque[Tuple[datetime, str]] = deque()
-        while self.pending_inbox:
-            recv_ts, peer = self.pending_inbox.popleft()
-            if not matched and recv_ts <= sent_ts:
-                latency_hrs = (sent_ts - recv_ts).total_seconds() / 3600.0
-                if 0.0 <= latency_hrs <= 168.0:
-                    self.reply_latencies_hours.append((sent_ts, latency_hrs))
-                    matched = True
-                    continue
-            remaining_inbox.append((recv_ts, peer))
-        self.pending_inbox = remaining_inbox
 
     def _evict_expired(self, current_time: datetime) -> None:
         c1 = current_time - timedelta(days=1)
@@ -65,11 +54,8 @@ class SlidingTimeWindow:
             self.queue_30d.popleft()
         while self.queue_90d and self.queue_90d[0][0] < c90:
             self.queue_90d.popleft()
-        while self.reply_latencies_hours and self.reply_latencies_hours[0][0] < c30:
-            self.reply_latencies_hours.popleft()
-        cutoff_pending = current_time - timedelta(days=14)
-        while self.pending_inbox and self.pending_inbox[0][0] < cutoff_pending:
-            self.pending_inbox.popleft()
+        while self.inter_message_latencies_hours and self.inter_message_latencies_hours[0][0] < c30:
+            self.inter_message_latencies_hours.popleft()
 
     def get_activity_dynamics(self) -> Tuple[float, float, float, float]:
         r1 = float(len(self.queue_1d))
@@ -83,14 +69,14 @@ class SlidingTimeWindow:
         return float(d_daily), float(d_weekly), float(d_monthly), float(d_quarterly)
 
     def get_reply_statistics(self) -> Tuple[float, float, float]:
-        if not self.reply_latencies_hours:
-            return 0.0, 0.0, 0.0
-        latencies = [val for _, val in self.reply_latencies_hours]
+        if not self.inter_message_latencies_hours:
+            return 12.0, 12.0, 4.0
+        latencies = [val for _, val in self.inter_message_latencies_hours]
         mean_val = float(sum(latencies) / len(latencies))
         sorted_vals = sorted(latencies)
         n = len(sorted_vals)
         median_val = float(sorted_vals[n // 2]) if n % 2 == 1 else float((sorted_vals[n // 2 - 1] + sorted_vals[n // 2]) / 2.0)
-        variance = sum((x - mean_val) ** 2 for x in latencies) / len(latencies)
+        variance = sum((x - mean_val) ** 2 for x in latencies) / max(len(latencies), 1)
         std_val = float(math.sqrt(variance))
         return mean_val, median_val, std_val
 
@@ -108,4 +94,3 @@ class SlidingTimeWindow:
             monthly_activity_change=d_monthly,
             quarterly_activity_change=d_quarterly
         )
-    
