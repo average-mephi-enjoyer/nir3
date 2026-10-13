@@ -1,50 +1,68 @@
-# core/schemas.py
-from typing import List, Optional
-from pydantic import BaseModel, Field
+from typing import List, Literal, Optional
+from pydantic import BaseModel, Field, ConfigDict
+
+RiskMarkerType = Literal[
+    "organizational_alienation",
+    "concealment_intent",
+    "rationalization",
+    "access_exfiltration_focus",
+    "conflict_escalation"
+]
+
 
 class SemanticMarkerItem(BaseModel):
     """
-    Element of the structured semantic marker with evidential binding.
-    Pydantic generates __init__ and validation automatically.
+    Structured marker element.
     """
-    marker_name: str = Field(
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    marker_name: RiskMarkerType = Field(
         ..., 
-        description="Marker type: organizational_alienation, concealment_intent, rationalization, access_exfiltration_focus, conflict_escalation"
+        description="Semantic marker type (ILI)"
     )
     score: float = Field(
         ..., 
         ge=0.0, 
         le=1.0, 
-        description="Degree of marker expression from 0.0 to 1.0"
+        description="Grade of degeneracy (0.0 - no risk, 1.0 - risk)"
     )
     evidence_span: str = Field(
         ..., 
-        description="Exact quote from the text serving as the basis for the assessment"
+        min_length=3,
+        description="Citation of evidence"
     )
     confidence: float = Field(
         ..., 
         ge=0.0, 
         le=1.0, 
-        description="Degree of confidence in the marker identification"
+        description="Confidence of the model (1.0 - max, 0.0 - min)"
     )
     alternative_explanation: Optional[str] = Field(
-        None, 
-        description="Alternative explanation (deadline, stress, joke, technical issue)" 
+        default=None, 
+        description="Alternative explanation"
     )
+
 
 class LLMSemanticAnalysisResponse(BaseModel):
     """
-    Validated response from the local LLM for a single analytical window or message.
+    Validated response of local LLM.
     """
-    markers: List[SemanticMarkerItem] = Field(default_factory=list)
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    markers: List[SemanticMarkerItem] = Field(
+        default_factory=list,
+        description="Semantic markers list"
+    )
     has_insufficient_context: bool = Field(
-        False, 
-        description="Flag indicating insufficient context for a reliable assessment"
+        default=False, 
+        description="Content insufficiency flag"
     )
     overall_sentiment_drift: float = Field(
-        0.0, 
+        default=0.0, 
         ge=-1.0, 
         le=1.0, 
-        description="Sentiment drift assessment (-1: negative, 1: positive)"
+        description="Segment grade: -1.0 (destructive) до +1.0 (constructive)"
     )
-    schema_version: str = Field("1.0", description="Version of the ontology schema")
+    schema_version: str = Field(
+        default="1.1", 
+        description="Schema version"
+    )

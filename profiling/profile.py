@@ -1,15 +1,19 @@
+from datetime import datetime
 import math
+from typing import Dict, List, Optional, Tuple
 import numpy as np
-from typing import Any, Dict, List, Optional, Tuple
 from core.models import MarkerVector
 from profiling.quarantine import QuarantineBuffer
 
 
 class ContaminationResistantProfile:
     """
-    Protection against adaptive contamination in the dynamic employee profile.
+    Dual-circuit dynamic profile resistant to poison injection and slow drift.
+    Combines individual statistics with empirical Bayesian role priors and
+    total variance decomposition: Var[X] = E[Var[X|R]] + Var[E[X|R]].
     """
-    TRACKED_MARKERS = [
+
+    TRACKED_MARKERS: List[str] = [
         "pronoun_marker",
         "syntactic_marker",
         "activity_marker",
@@ -21,6 +25,7 @@ class ContaminationResistantProfile:
         "llm_access_focus",
         "llm_conflict"
     ]
+
     STRESS_SENSITIVE_MARKERS = {
         "llm_alienation",
         "llm_conflict",
@@ -49,7 +54,6 @@ class ContaminationResistantProfile:
         self.trusted_means: Dict[str, float] = {}
         self.trusted_variances: Dict[str, float] = {}
         self.observations_count: int = 0
-        self.means_history: Dict[str, List[float]] = {m: [] for m in self.TRACKED_MARKERS}
         self.quarantine = QuarantineBuffer(
             quarantine_delay_days=quarantine_delay_days,
             h_quarantine=base_h_quarantine
@@ -62,7 +66,11 @@ class ContaminationResistantProfile:
             self.trusted_means[marker] = float(prior.get("mean", 0.0))
             self.trusted_variances[marker] = float(prior.get("variance", 1.0))
 
-    def marker_vector_to_dict(self, markers: MarkerVector) -> Dict[str, float]:
+    @classmethod
+    def marker_vector_to_dict(cls, markers: MarkerVector) -> Dict[str, float]:
+        """
+        Extract numerical features from MarkerVector safely into a dictionary.
+        """
         raw_dict = {
             "pronoun_marker": markers.pronoun_marker,
             "syntactic_marker": markers.syntactic_marker,
@@ -75,16 +83,16 @@ class ContaminationResistantProfile:
             "llm_access_focus": markers.llm_access_focus,
             "llm_conflict": markers.llm_conflict
         }
-        clean_dict = {}
-        for m in self.TRACKED_MARKERS:
+        clean_dict: Dict[str, float] = {}
+        for m in cls.TRACKED_MARKERS:
             val = raw_dict.get(m, 0.0)
             clean_dict[m] = 0.0 if (val is None or math.isnan(val)) else float(val)
         return clean_dict
 
     def get_mixed_parameters(self, marker_name: str) -> Tuple[float, float]:
         """
-        Returns the mixed mean and standard deviation for a given marker,
-        combining individual and role-based priors with adaptive shrinkage.
+        Calculate mixed expected value and safe standard deviation via Law of Total Variance.
+        Var_total = eta * Var_ind + (1 - eta) * Var_role + eta * (1 - eta) * (mu_ind - mu_role)^2.
         """
         mu_ind = self.trusted_means.get(marker_name, 0.0)
         var_ind = max(self.trusted_variances.get(marker_name, self.min_variance), self.min_variance)
@@ -103,12 +111,10 @@ class ContaminationResistantProfile:
 
     def compute_dynamic_thresholds(self, team_workload_factor: float) -> Tuple[float, float]:
         """
-        Contextual resilience filter:
-        when high team workload is detected (deadline, reorganization, release),
-        anomalous thresholds are raised, excluding false alarms during legitimate stress.        
-        team_workload_factor in [0.0, 1.0].
+        Adjust alert and quarantine thresholds under organizational stress.
         """
-        threshold_multiplier = 1.0 + 0.6 * float(np.clip(team_workload_factor, 0.0, 1.0))
+        clamped_factor = float(np.clip(team_workload_factor, 0.0, 1.0))
+        threshold_multiplier = 1.0 + 0.6 * clamped_factor
         adapted_h_quarantine = self.base_h_quarantine * threshold_multiplier
         adapted_h_alert = self.base_h_alert * threshold_multiplier
         return adapted_h_quarantine, adapted_h_alert
@@ -119,8 +125,7 @@ class ContaminationResistantProfile:
         team_workload_factor: float = 0.0
     ) -> Tuple[Dict[str, float], float, bool]:
         """
-        Compute normalized z-deviations and integral risk.
-        Returns: (z_scores, risk_score, is_alert).
+        Compute standardized Z-scores and root-mean-square composite risk.
         """
         mark_dict = self.marker_vector_to_dict(markers)
         z_scores: Dict[str, float] = {}
@@ -129,7 +134,8 @@ class ContaminationResistantProfile:
         for m in self.TRACKED_MARKERS:
             val = mark_dict[m]
             mean_mix, std_mix = self.get_mixed_parameters(m)
-            if m in self.STRESS_SENSITIVE_MARKERS and team_workload_factor > 0:
+
+            if m in self.STRESS_SENSITIVE_MARKERS and team_workload_factor > 0.0:
                 std_mix *= (1.0 + 0.5 * team_workload_factor)
             raw_z = (val - mean_mix) / (std_mix + 1e-6)
             clipped_z = max(-self.clip_limit, min(self.clip_limit, raw_z))
@@ -142,15 +148,14 @@ class ContaminationResistantProfile:
     def register_observation(
         self,
         markers: MarkerVector,
-        timestamp: Any,
+        timestamp: datetime,
         team_workload_factor: float = 0.0
     ) -> Tuple[Dict[str, float], float, bool]:
         """
-        Main profiling loop:
-        1. Compute deviations and risk assessment with contextual filter.
-        2. Dynamically adapt the h_quarantine threshold.
-        3. Place in 14-day quarantine.
-        4. Admit mature clean observations to the trusted profile.
+        Profile execution cycle:
+        1. Calculate current risk metrics against baseline.
+        2. Enqueue in the quarantine buffer.
+        3. Extract and admit mature clean observations to the baseline model.
         """
         z_scores, risk_score, is_alert = self.compute_deviations(markers, team_workload_factor)
         dynamic_h_quarantine, _ = self.compute_dynamic_thresholds(team_workload_factor)
@@ -169,13 +174,13 @@ class ContaminationResistantProfile:
 
     def _update_trusted_baseline(self, clean_marker_dict: Dict[str, float]) -> None:
         """
-        EMA-update of the trusted baseline using only clean observations.
+        Exponential Moving Average (EMA) update strictly from mature clean observations.
+        Increments the observation counter exactly once per admitted observation.
         """
         if self.observations_count == 0 and not self.role_priors:
             for m in self.TRACKED_MARKERS:
                 self.trusted_means[m] = clean_marker_dict[m]
                 self.trusted_variances[m] = self.min_variance
-                self.means_history[m].append(clean_marker_dict[m])
             self.observations_count = 1
             return
         for m in self.TRACKED_MARKERS:
@@ -187,12 +192,10 @@ class ContaminationResistantProfile:
             new_var = (1.0 - self.alpha_ema) * prev_var + self.alpha_ema * (diff ** 2)
             self.trusted_means[m] = float(new_mean)
             self.trusted_variances[m] = max(float(new_var), self.min_variance)
-            self.means_history[m].append(float(new_mean))
         self.observations_count += 1
 
-    def freeze_on_alert(self, alert_time: Any) -> int:
+    def freeze_on_alert(self, alert_time: datetime) -> int:
         """
-        Protection mechanism upon forming a persistent alert signal:
-        immediate purge of the quarantine buffer from all windows since the start of the incident.
+        Rollback and lock the quarantine buffer upon alert generation.
         """
         return self.quarantine.purge_suspicious_horizon(start_time=alert_time)

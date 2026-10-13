@@ -1,13 +1,12 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional, Any
+import numpy as np
 
 
-@dataclass
+@dataclass(slots=True)
 class CommunicationMessage:
-    """
-    Communication event (Email, мессенджер).
-    """
+    """Corporative communication event"""
     sender_id: str
     receiver_ids: List[str]
     timestamp: datetime
@@ -20,12 +19,14 @@ class CommunicationMessage:
     def is_valid(self) -> bool:
         return bool(self.sender_id and self.receiver_ids and self.timestamp and (self.cleaned_body or self.body))
 
+    @property
+    def text_content(self) -> str:
+        return (self.cleaned_body or self.body or "").strip()
 
-@dataclass
+
+@dataclass(slots=True)
 class EmployeeContext:
-    """
-    Operational and graph-based context of an employee within the observation window.
-    """
+    """Operational & graph context."""
     employee_id: str
     role: str = "general"
     indegree: float = 0.0
@@ -41,10 +42,10 @@ class EmployeeContext:
     quarterly_activity_change: float = 0.0
 
 
-@dataclass
+@dataclass(slots=True)
 class MarkerVector:
     """
-    Combined feature vector (statistical NLP + LLM).
+    Unified markers vector.
     """
     pronoun_marker: float = 0.0
     syntactic_marker: float = 0.0
@@ -58,12 +59,34 @@ class MarkerVector:
     llm_conflict: float = 0.0
     llm_uncertainty: float = 1.0
 
+    def to_numpy(self) -> np.ndarray:
+        """Vectorisation"""
+        return np.array([
+            self.pronoun_marker,
+            self.syntactic_marker,
+            self.activity_marker,
+            self.response_marker,
+            self.social_marker,
+            self.llm_alienation,
+            self.llm_concealment,
+            self.llm_rationalization,
+            self.llm_access_focus,
+            self.llm_conflict,
+        ], dtype=np.float64)
 
-@dataclass
+    @classmethod
+    def feature_names(cls) -> List[str]:
+        return [
+            "pronoun_marker", "syntactic_marker", "activity_marker", 
+            "response_marker", "social_marker", "llm_alienation", 
+            "llm_concealment", "llm_rationalization", "llm_access_focus", 
+            "llm_conflict"
+        ]
+
+
+@dataclass(slots=True)
 class RiskSignal:
-    """
-    Early warning signal output.
-    """
+    """Output signal."""
     employee_id: str
     timestamp: datetime
     raw_markers: MarkerVector
@@ -73,15 +96,13 @@ class RiskSignal:
     evidence_spans: List[str] = field(default_factory=list)
 
 
-@dataclass
+@dataclass(slots=True)
 class TelemetryEvent:
-    """
-    Событие системной телеметрии (CERT r4.2: logon, device, file, http).
-    """
+    """Telemetry event."""
     event_id: str
     user_id: str
     timestamp: datetime
-    event_type: str  # 'logon', 'logoff', 'device_connect', 'device_disconnect', 'file_copy', 'http_access'
+    event_type: str
     pc_id: str
     target_resource: Optional[str] = None
     activity_details: Dict[str, Any] = field(default_factory=dict)

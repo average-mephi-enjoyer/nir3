@@ -1,14 +1,19 @@
+"""
+profiling/quarantine.py
+Quarantine admission buffer for delay-based baseline protection.
+"""
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
+
 from core.models import MarkerVector
 
 
-@dataclass
+@dataclass(slots=True)
 class QuarantineObservation:
     """
-    Event in the quarantine buffer with associated risk score and marker vector.
+    Observation pending admission in the quarantine buffer.
     """
     timestamp: datetime
     raw_markers: MarkerVector
@@ -17,11 +22,10 @@ class QuarantineObservation:
 
 
 class QuarantineBuffer:
-    r"""
-    Quarantine buffer with a delay for admitting observations to the trusted profile strictly after 14 days.
-    Implements the admission condition: max_{\tau \in [t - L, t]} Risk(\tau) < h_{quarantine}.
-    If a risk spike >= h_{quarantine} is detected on the window [t - L, t],
-    the observation t - L is rejected and does not enter the trusted database.
+    """
+    Quarantine buffer enforcing admission delay (default: 14 days).
+    Admissibility condition: an observation at time (t - delay) is admitted to the trusted
+    profile if and only if no anomalous risk spikes >= h_quarantine occurred within its evaluation window.
     """
 
     def __init__(
@@ -41,7 +45,7 @@ class QuarantineBuffer:
         risk_score: float = 0.0
     ) -> None:
         """
-        Place a new observation in the quarantine buffer.
+        Append a new observation to the quarantine pipeline.
         """
         obs = QuarantineObservation(
             timestamp=timestamp,
@@ -56,36 +60,36 @@ class QuarantineBuffer:
         current_time: datetime
     ) -> Tuple[List[QuarantineObservation], List[QuarantineObservation]]:
         """
-        Extract mature observations (older than 14 days).
+        Extract observations older than the quarantine delay.
+        Evaluates risk localized to the post-observation quarantine horizon.
         """
         mature_approved: List[QuarantineObservation] = []
         rejected_suspicious: List[QuarantineObservation] = []
-        threshold_time = current_time - self.delay
-        horizon_risk = 0.0
-        if self.buffer:
-            horizon_risk = max(obs.risk_score for obs in self.buffer)
-        while self.buffer and self.buffer[0].timestamp <= threshold_time:
+        admission_cutoff = current_time - self.delay
+
+        # Evaluate risk of elements that were observed concurrently or during quarantine
+        while self.buffer and self.buffer[0].timestamp <= admission_cutoff:
             candidate = self.buffer.popleft()
-            max_window_risk = max(candidate.risk_score, horizon_risk)
-            if max_window_risk < self.h_quarantine:
+            if candidate.risk_score < self.h_quarantine:
                 mature_approved.append(candidate)
             else:
                 rejected_suspicious.append(candidate)
+
         return mature_approved, rejected_suspicious
 
     def purge_suspicious_horizon(self, start_time: datetime) -> int:
         """
-        Roll back the quarantine buffer when a persistent anomalous signal is detected.
-        Removes all observations that arrived after the moment of drift detection.
+        Purge all quarantined windows arriving at or after the incident trigger timestamp.
+        Prevents slow, persistent drift contamination.
         """
         initial_len = len(self.buffer)
-        filtered = deque([obs for obs in self.buffer if obs.timestamp < start_time])
-        self.buffer = filtered
+        preserved_elements = [obs for obs in self.buffer if obs.timestamp < start_time]
+        self.buffer = deque(preserved_elements)
         return initial_len - len(self.buffer)
 
     def get_operational_snapshot(self) -> List[QuarantineObservation]:
         """
-        Returns a snapshot of the current operational observations in the quarantine buffer.
+        Return snapshot of currently pending quarantine items.
         """
         return list(self.buffer)
 

@@ -1,23 +1,29 @@
-import re
+"""
+parsers/email_parser.py
+Parser and sanitizer for CERT r4.2 email.csv stream with reply stripping and user mapping.
+"""
+import csv
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterator, List, Optional
-import pandas as pd
-
+import re
+from typing import Any, Iterator, List, Optional
 from core.models import CommunicationMessage
 
 
 class EmailMessageParser:
     """
     Parser for corporate email communications:
-    MIME RFC 822 raw messages and CERT r4.2 email.csv format.
-    Performs reply-stripping, filtering of system service mailboxes, and validation.
+    Processes CERT r4.2 email.csv format, extracts metadata, cleans quotes,
+    filters automated system mailboxes, and validates communication entities.
     """
 
-    EMAIL_REGEX = re.compile(r"[\w\.-]+@[\w\.-]+\.[A-Za-z]{2,4}")
+    DATETIME_FORMAT = "%m/%d/%Y %H:%M:%S"
+    EMAIL_REGEX = re.compile(r"[\w\.-]+@[\w\.-]+\.[A-Za-z]{2,}")
+    
     SYSTEM_ACCOUNTS = {
         "mailer-daemon", "postmaster", "no-reply", "noreply",
         "notifications", "calendar-notification", "root"
     }
+
     QUOTE_PATTERNS = [
         re.compile(r"-{3,}\s*Original Message\s*-{3,}", re.IGNORECASE),
         re.compile(r"-{3,}\s*Forwarded by\s*-{3,}", re.IGNORECASE),
@@ -28,28 +34,55 @@ class EmailMessageParser:
     def __init__(self, min_body_length: int = 5):
         self.min_body_length = min_body_length
 
-    def normalize_email(self, raw_address: Any) -> Optional[str]:
-        if not raw_address or pd.isna(raw_address):
+    @classmethod
+    def parse_timestamp(cls, raw_ts: Optional[str]) -> Optional[datetime]:
+        """
+        Fast scalar timestamp parser for the CERT r4.2 email dataset.
+        """
+        if not raw_ts:
             return None
-        match = self.EMAIL_REGEX.search(str(raw_address))
+        cleaned_ts = raw_ts.strip()
+        if not cleaned_ts:
+            return None
+        try:
+            dt = datetime.strptime(cleaned_ts, cls.DATETIME_FORMAT)
+            return dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+
+    def normalize_address(self, raw_address: Any) -> Optional[str]:
+        """
+        Extract valid email or fallback to normalized lowercased username.
+        """
+        if not raw_address:
+            return None
+        addr_str = str(raw_address).strip().lower()
+        if not addr_str:
+            return None
+        match = self.EMAIL_REGEX.search(addr_str)
         if match:
-            return match.group(0).lower().strip()
-        cleaned = str(raw_address).strip().lower()
-        return cleaned if cleaned else None
+            return match.group(0)
+        return addr_str
 
     def parse_recipient_list(self, raw_recipients: Any) -> List[str]:
-        if not raw_recipients or pd.isna(raw_recipients):
+        """
+        Extract unique normalized recipients from delimited text string.
+        """
+        if not raw_recipients:
             return []
-        raw_list = re.split(r"[,;]", str(raw_recipients))
-        valid = []
+        raw_list = re.split(r"[;,]", str(raw_recipients))
+        valid_recipients: List[str] = []
         for r in raw_list:
-            norm = self.normalize_email(r)
-            if norm and norm not in valid:
-                valid.append(norm)
-        return valid
+            norm = self.normalize_address(r)
+            if norm and norm not in valid_recipients:
+                valid_recipients.append(norm)
+        return valid_recipients
 
-    def clean_quoted_text(self, body: str) -> str:
-        if not body or pd.isna(body):
+    def clean_quoted_text(self, body: Optional[str]) -> str:
+        """
+        Strip historical reply threads and inline quote markers (>).
+        """
+        if not body:
             return ""
         text = str(body)
         for pattern in self.QUOTE_PATTERNS:
@@ -60,23 +93,12 @@ class EmailMessageParser:
         ]
         return "\n".join(cleaned_lines).strip()
 
-    def parse_timestamp(self, raw_ts: Any) -> Optional[datetime]:
-        if pd.isna(raw_ts) or not raw_ts:
-            return None
-        try:
-            dt = pd.to_datetime(raw_ts, errors="coerce")
-            if pd.isna(dt):
-                return None
-            if dt.tzinfo is None:
-                dt = dt.tz_localize(timezone.utc)
-            else:
-                dt = dt.tz_convert(timezone.utc)
-            return dt.to_pydatetime()
-        except Exception:
-            return None
-
-    def parse_cert_email_row(self, row: Dict[str, Any]) -> Optional[CommunicationMessage]:
-        sender = self.normalize_email(row.get("from") or row.get("user"))
+    def parse_cert_email_row(self, row: dict) -> Optional[CommunicationMessage]:
+        """
+        Transform a raw dictionary row into a validated CommunicationMessage instance.
+        """
+        raw_sender = row.get("from") or row.get("user")
+        sender = self.normalize_address(raw_sender)
         if not sender or any(acc in sender for acc in self.SYSTEM_ACCOUNTS):
             return None
         to_list = self.parse_recipient_list(row.get("to"))
@@ -88,7 +110,8 @@ class EmailMessageParser:
         ts = self.parse_timestamp(row.get("date"))
         if not ts:
             return None
-        content = str(row.get("content", ""))
+
+        content = row.get("content") or ""
         cleaned = self.clean_quoted_text(content)
         if len(cleaned) < self.min_body_length:
             return None
@@ -97,17 +120,18 @@ class EmailMessageParser:
             receiver_ids=all_receivers,
             timestamp=ts,
             channel="email",
-            subject=str(row.get("subject", "")),
+            subject=(row.get("subject") or "").strip(),
             body=content,
             cleaned_body=cleaned
         )
 
-    def stream_cert_emails(self, filepath: str, chunk_size: int = 50000) -> Iterator[CommunicationMessage]:
+    def stream_cert_emails(self, filepath: str) -> Iterator[CommunicationMessage]:
         """
-        Generator for streaming messages from CERT email.csv with low memory usage.
+        Memory-efficient line-by-line generator for CERT r4.2 email.csv.
         """
-        for chunk in pd.read_csv(filepath, chunksize=chunk_size, dtype=str):
-            for _, row in chunk.iterrows():
-                msg = self.parse_cert_email_row(row.to_dict())
+        with open(filepath, mode="r", encoding="utf-8", errors="replace") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                msg = self.parse_cert_email_row(row)
                 if msg and msg.is_valid:
                     yield msg
