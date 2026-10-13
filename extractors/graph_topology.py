@@ -1,5 +1,6 @@
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
+import math
 from typing import Deque, Dict, List, Optional, Set, Tuple
 import networkx as nx
 from core.models import CommunicationMessage, EmployeeContext
@@ -7,12 +8,17 @@ from core.models import CommunicationMessage, EmployeeContext
 
 class DynamicCommunicationGraph:
     """
-    Time-decayed directed communication graph with Laplace-smoothed reciprocity.
+    Time-decayed directed communication multigraph tracking:
+    - Ego-network centrality and reciprocity;
+    - Edge weight distribution (volume per recipient);
+    - External non-corporate domain communication leakage (exfiltration channel).
     """
+
+    CORPORATE_DOMAINS = {"dtaa.com"}
 
     def __init__(self, decay_window_days: int = 30):
         self.decay_window = timedelta(days=decay_window_days)
-        self.edge_stream: Deque[Tuple[datetime, str, str]] = deque()
+        self.edge_stream: Deque[Tuple[datetime, str, str, bool]] = deque()
         self.adjacency_counts: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
         self.user_aliases: Dict[str, Set[str]] = defaultdict(set)
 
@@ -22,6 +28,11 @@ class DynamicCommunicationGraph:
         self.user_aliases[u].add(e)
         self.user_aliases[e].add(u)
 
+    def _is_external_address(self, email: str) -> bool:
+        if "@" not in email:
+            return False
+        domain = email.split("@")[-1].lower().strip()
+        return domain not in self.CORPORATE_DOMAINS
     def add_communication(self, message: CommunicationMessage) -> None:
         sender = (message.sender_user_id or message.sender_id).lower().strip()
         ts = message.timestamp
@@ -29,14 +40,15 @@ class DynamicCommunicationGraph:
             target = recipient.lower().strip()
             if sender == target:
                 continue
-            self.edge_stream.append((ts, sender, target))
+            is_external = self._is_external_address(target)
+            self.edge_stream.append((ts, sender, target, is_external))
             self.adjacency_counts[sender][target] += 1
         self._evict_expired(ts)
 
     def _evict_expired(self, current_time: datetime) -> None:
         cutoff = current_time - self.decay_window
         while self.edge_stream and self.edge_stream[0][0] < cutoff:
-            _, src, tgt = self.edge_stream.popleft()
+            _, src, tgt, _ = self.edge_stream.popleft()
             self.adjacency_counts[src][tgt] -= 1
             if self.adjacency_counts[src][tgt] <= 0:
                 del self.adjacency_counts[src][tgt]
@@ -80,28 +92,36 @@ class DynamicCommunicationGraph:
                     g.add_edge(u, v, weight=weight)
         return g
 
-    def compute_node_metrics(self, employee_id: str) -> Tuple[float, float, float, float]:
+    def compute_advanced_topology(self, employee_id: str) -> Tuple[float, float, float, float, float]:
+        """
+        Calculates advanced topological and exfiltration metrics:
+        Returns: (indegree, outdegree, reciprocity, betweenness, external_traffic_ratio).
+        """
         matched_nodes = self._resolve_candidate_nodes(employee_id)
         if not matched_nodes:
-            return 0.0, 0.0, 0.5, 0.0
+            return 0.0, 0.0, 0.5, 0.0, 0.0
         root_node = matched_nodes[0]
+        outgoing_edges = self.adjacency_counts.get(root_node, {})
+        if not outgoing_edges:
+            return 0.0, 0.0, 0.5, 0.0, 0.0
+        total_sent = sum(outgoing_edges.values())
+        external_sent = sum(count for target, count in outgoing_edges.items() if self._is_external_address(target))
+        external_ratio = float(external_sent / total_sent) if total_sent > 0 else 0.0
         ego_g = self.build_ego_graph(root_node, radius=2)
-        if ego_g.number_of_nodes() <= 1:
-            return 0.0, 0.0, 0.5, 0.0
         in_degree = float(ego_g.in_degree(root_node, weight="weight"))
         out_degree = float(ego_g.out_degree(root_node, weight="weight"))
         outgoing = set(ego_g.successors(root_node))
         incoming = set(ego_g.predecessors(root_node))
-        mutual = len(outgoing.intersection(incoming))
-        reciprocity = float((mutual + 1.0) / (len(outgoing) + 2.0))
+        reciprocity = float((len(outgoing.intersection(incoming)) + 1.0) / (len(outgoing) + 2.0))
         betweenness_dict = nx.betweenness_centrality(ego_g, normalized=True, weight="weight")
         betweenness = float(betweenness_dict.get(root_node, 0.0))
-        return in_degree, out_degree, reciprocity, betweenness
+        return in_degree, out_degree, reciprocity, betweenness, external_ratio
 
     def update_context(self, context: EmployeeContext) -> EmployeeContext:
-        in_deg, out_deg, recip, betw = self.compute_node_metrics(context.employee_id)
+        in_deg, out_deg, recip, betw, ext_ratio = self.compute_advanced_topology(context.employee_id)
         context.indegree = in_deg
         context.outdegree = out_deg
         context.reciprocity = recip
         context.betweenness = betw
+        context.betweenness = ext_ratio
         return context

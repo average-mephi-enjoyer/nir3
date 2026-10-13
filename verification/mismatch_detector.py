@@ -1,15 +1,12 @@
 from dataclasses import dataclass
 from datetime import datetime
 import re
-from typing import List, Set
+from typing import Dict, List, Set
 from core.models import CommunicationMessage, TelemetryEvent
 
 
 @dataclass(slots=True)
 class MismatchAnalysisResult:
-    """
-    Verification result of semantic-technical mismatch analysis.
-    """
     user_id: str
     timestamp: datetime
     stated_projects: List[str]
@@ -18,49 +15,58 @@ class MismatchAnalysisResult:
     mismatch_ratio: float
     has_usb_exfiltration: bool
     is_suspicious_mismatch: bool
+    threat_severity: str
     explanation: str
 
 
 class SemanticTechnicalMismatchDetector:
-    """
-    Evaluates discrepancy between declared intentions in communication channels
-    and observable digital footprints in host/network telemetry.
-    """
-
-    STOP_WORDS = {
-        "the", "and", "for", "with", "about", "from", "that", "this",
-        "work", "task", "project", "team", "deal", "contract"
+    DOMAIN_ONTOLOGY: Dict[str, Set[str]] = {
+        "finance": {"finance", "financial", "audit", "budget", "billing", "revenue", "payroll", "tax", "cost", "invoice", "excel", "xlsx", "csv"},
+        "engineering": {"engineering", "cad", "design", "schematic", "source", "code", "firmware", "build", "rnd", "git", "bin", "zip", "tar"},
+        "hr_management": {"hiring", "interview", "resume", "performance", "review", "salary", "contract", "employee", "roster", "staff"},
+        "legal": {"legal", "compliance", "policy", "lawyer", "nda", "patent", "intellectual", "agreement", "regulation"},
+        "marketing_sales": {"client", "customer", "market", "proposal", "presentation", "deck", "campaign", "lead", "pptx"}
     }
 
-    PROJECT_KEYWORD_REGEX = re.compile(
-        r"\b(?:project|task|working\s+on|ref|deal|contract|team)\s+([A-Za-z0-9_\-]+)\b",
-        re.IGNORECASE
-    )
+    IGNORED_SYSTEM_PATTERNS = [
+        re.compile(r"\\windows\\", re.IGNORECASE),
+        re.compile(r"\\program files", re.IGNORECASE),
+        re.compile(r"\\appdata\\", re.IGNORECASE),
+        re.compile(r"\.(?:dll|exe|sys|tmp|lnk|dat|ini)$", re.IGNORECASE)
+    ]
 
-    FILE_EXTENSION_REGEX = re.compile(r"\b\w+\.(?:doc|docx|pdf|xls|xlsx|zip|tar|rar|csv|txt|ppt|pptx)\b", re.IGNORECASE)
+    NOISE_WORDS = {
+        "the", "and", "for", "with", "about", "from", "that", "this", "project", "task",
+        "team", "work", "worked", "working", "began", "much", "simply", "specific", "award",
+        "common", "local", "available", "evidenced", "journalist", "threats", "edward", "glenn",
+        "hello", "thanks", "regards", "please", "update", "meeting", "status"
+    }
+
+    TOKEN_PATTERN = re.compile(r"\b[a-zA-Z]{3,}\b")
 
     def __init__(self, mismatch_threshold: float = 0.5):
         self.mismatch_threshold = mismatch_threshold
 
-    def extract_stated_topics(self, messages: List[CommunicationMessage]) -> Set[str]:
-        """
-        Extract declared projects, keywords, and explicit file artifacts from email text.
-        """
-        topics: Set[str] = set()
+    def _is_system_background_file(self, filepath: str) -> bool:
+        return any(pat.search(filepath) for pat in self.IGNORED_SYSTEM_PATTERNS)
+
+    def extract_stated_categories(self, messages: List[CommunicationMessage]) -> Set[str]:
+        active_categories: Set[str] = set()
         for msg in messages:
-            content = f"{msg.subject or ''} {msg.text_content}"
-            if not content.strip():
-                continue
-            matches = self.PROJECT_KEYWORD_REGEX.findall(content)
-            for m in matches:
-                clean_m = m.lower().strip()
-                if len(clean_m) >= 3 and clean_m not in self.STOP_WORDS:
-                    topics.add(clean_m)
-            file_refs = self.FILE_EXTENSION_REGEX.findall(content)
-            for f in file_refs:
-                clean_f = f.lower().strip()
-                topics.add(clean_f)
-        return topics
+            content = f"{msg.subject or ''} {msg.text_content}".lower()
+            tokens = set(self.TOKEN_PATTERN.findall(content)) - self.NOISE_WORDS
+            for category, keywords in self.DOMAIN_ONTOLOGY.items():
+                if tokens.intersection(keywords):
+                    active_categories.add(category)
+        return active_categories
+
+    def _resolve_resource_category(self, filepath: str) -> Set[str]:
+        clean_path = filepath.lower().replace("/", "\\")
+        matched_categories: Set[str] = set()
+        for category, keywords in self.DOMAIN_ONTOLOGY.items():
+            if any(kw in clean_path for kw in keywords):
+                matched_categories.add(category)
+        return matched_categories
 
     def evaluate_mismatch(
         self,
@@ -69,55 +75,56 @@ class SemanticTechnicalMismatchDetector:
         telemetry_events: List[TelemetryEvent],
         current_time: datetime
     ) -> MismatchAnalysisResult:
-        """
-        Compare telemetry resource paths against extracted topics.
-        """
-        stated_topics = self.extract_stated_topics(messages)
+        stated_categories = self.extract_stated_categories(messages)
         file_events = [e for e in telemetry_events if e.event_type == "file_transfer"]
         usb_events = [e for e in telemetry_events if "device_connect" in e.event_type]
         has_usb = len(usb_events) > 0
-        accessed_resources: List[str] = []
+        meaningful_accessed: List[str] = []
         unrelated_resources: List[str] = []
         for fe in file_events:
             target = fe.target_resource or ""
-            if not target:
+            if not target or self._is_system_background_file(target):
                 continue
-            accessed_resources.append(target)
+            meaningful_accessed.append(target)
             target_lower = target.lower()
-            if stated_topics:
-                matches_topic = any(topic in target_lower for topic in stated_topics)
-                if not matches_topic:
-                    unrelated_resources.append(target)
-            else:
+            resource_cats = self._resolve_resource_category(target_lower)
+            category_match = bool(stated_categories.intersection(resource_cats))
+            if not category_match:
                 unrelated_resources.append(target)
-        total_files = len(accessed_resources)
-        mismatch_ratio = (len(unrelated_resources) / total_files) if total_files > 0 else 0.0
-        is_suspicious = (
-            (total_files >= 2 and mismatch_ratio >= self.mismatch_threshold)
-            or (has_usb and total_files > 0)
-        )
+        total_meaningful_files = len(meaningful_accessed)
+        mismatch_ratio = float(len(unrelated_resources) / total_meaningful_files) if total_meaningful_files > 0 else 0.0
+        if has_usb and total_meaningful_files > 0:
+            severity = "CRITICAL_EXFILTRATION"
+            is_suspicious = True
+        elif total_meaningful_files >= 2 and mismatch_ratio >= self.mismatch_threshold:
+            severity = "PROBING"
+            is_suspicious = True
+        else:
+            severity = "BENIGN"
+            is_suspicious = False
         explanations: List[str] = []
         if has_usb:
-            explanations.append(f"Removable storage connection registered ({len(usb_events)} events)")
-        if stated_topics:
-            explanations.append(f"Stated communication topics: {', '.join(sorted(stated_topics))}")
-        else:
-            explanations.append("No project references detected in recent communication")
+            explanations.append(f"Removable USB storage attached ({len(usb_events)} events)")
+        if stated_categories:
+            explanations.append(f"Declared communication domains: {', '.join(sorted(stated_categories))}")
         if unrelated_resources:
             explanations.append(
-                f"Uncorrelated file transfers: {len(unrelated_resources)}/{total_files} "
-                f"(mismatch ratio: {mismatch_ratio:.2f})"
+                f"Out-of-role resource exploration: {len(unrelated_resources)}/{total_meaningful_files} "
+                f"(mismatch: {mismatch_ratio:.2f}, status: {severity})"
             )
-        full_explanation = "; ".join(explanations) if explanations else "Technical telemetry aligns with communication."
-
+        elif total_meaningful_files == 0:
+            explanations.append("Host telemetry is calm. Early psycholinguistic drift warning.")
+        else:
+            explanations.append("All accessed files align with authorized communication context.")
         return MismatchAnalysisResult(
             user_id=user_id,
             timestamp=current_time,
-            stated_projects=sorted(stated_topics),
-            accessed_resources=accessed_resources,
+            stated_projects=sorted(list(stated_categories)),
+            accessed_resources=meaningful_accessed,
             unrelated_resources=unrelated_resources,
-            mismatch_ratio=float(mismatch_ratio),
+            mismatch_ratio=mismatch_ratio,
             has_usb_exfiltration=has_usb,
             is_suspicious_mismatch=is_suspicious,
-            explanation=full_explanation
+            threat_severity=severity,
+            explanation="; ".join(explanations)
         )

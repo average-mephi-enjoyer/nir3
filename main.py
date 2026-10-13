@@ -17,6 +17,7 @@ from profiling.profile import ContaminationResistantProfile
 from profiling.sliding_window import SlidingTimeWindow
 from profiling.workload_filter import TeamWorkloadContextTracker
 from verification.log_correlation import TargetedRetrospectiveVerifier
+from profiling.sequential_decision import SequentialDecisionManager
 
 
 def load_cert_ground_truth(answers_filepath: str) -> Dict[str, Dict[str, datetime]]:
@@ -72,6 +73,7 @@ def run_cert_dataset_evaluation(
     statistical_extractor = SpacyStatisticalExtractor()
     llm_extractor = LLMSemanticExtractor(force_offline_mode=use_mock_llm)
     comm_graph.register_alias(target_norm, f"{target_norm}@")
+    decision_manager = SequentialDecisionManager(alpha_fpr=0.01, k=3, n=5, use_conformal=True)
     print("[*] Ingesting telemetry logs (device.csv, file.csv)...")
     if os.path.exists(device_path):
         for event in telem_parser.stream_device_events(device_path):
@@ -136,13 +138,20 @@ def run_cert_dataset_evaluation(
             for m in ContaminationResistantProfile.TRACKED_MARKERS:
                 marker_histories[m].append(v_dict[m])
                 baseline_histories[m].append(protected_profile.trusted_means.get(m, 0.0))
-            if is_alert and first_alert_time is None:
+            is_confirmed_alert, rationale = decision_manager.process_observation(
+                risk_score=risk_score,
+                is_instant_alert=is_alert,
+                is_clean_mature=(len(protected_profile.quarantine) >= 14 and not is_alert)
+            )
+            if is_confirmed_alert and first_alert_time is None:
                 first_alert_time = msg.timestamp
-                print(f"[!] Risk Alert Triggered on CERT Event at {msg.timestamp}")
+                print(f"[!] CONFIRMED RISK ALERT TRIGGERED on CERT Event at {msg.timestamp}")
+                print(f"    --> Sequential Logic: {rationale}")
                 sig = RiskSignal(employee_id=target_norm, timestamp=msg.timestamp, raw_markers=vector, normalized_deviations=z_scores)
                 audit_res = verifier.verify_alert_signal(sig)
                 print(f"    --> Stage 2 Technical Audit: {audit_res.explanation}")
                 protected_profile.freeze_on_alert(msg.timestamp)
+                decision_manager.freeze()
     lead_time = BenchmarkEvaluator.calculate_alarm_lead_time(first_alert_time, t_first_action)
     print("\n" + "=" * 80)
     print("CERT r4.2 EVALUATION SUMMARY")

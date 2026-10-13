@@ -62,7 +62,9 @@ class SpacyStatisticalExtractor(IFeatureExtractor):
             vector.activity_marker = float(np.clip(act_change / 3.0, 0.0, 1.0))
             rep_std = context.reply_time_std
             vector.response_marker = float(np.clip(rep_std / 24.0, 0.05, 0.95))
+            ext_ratio = context.betweenness
             out_deg = context.outdegree
-            social_isolation = 1.0 / (1.0 + math.log1p(max(out_deg, 0.0)))
-            vector.social_marker = float(np.clip(social_isolation, 0.10, 0.90))
+            structural_isolation = 1.0 / (1.0 + math.log1p(max(out_deg, 0.0)))
+            composite_social = 0.4 * structural_isolation + 0.6 * (ext_ratio * 3.0)
+            vector.social_marker = float(np.clip(composite_social, 0.05, 0.95))
         return vector
