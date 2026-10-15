@@ -6,9 +6,6 @@ import numpy as np
 
 @dataclass(slots=True)
 class EvaluationMetricsResult:
-    """
-    Complex evaluation metrics bundle for experimental benchmarking.
-    """
     model_name: str
     pr_auc: float
     recall_at_fixed_fpr: float
@@ -19,19 +16,11 @@ class EvaluationMetricsResult:
 
 
 class BenchmarkEvaluator:
-    """
-    Verification metrics computing baseline contamination rate,
-    early-warning lead time, and Average Precision (PR-AUC).
-    """
-
     @staticmethod
     def calculate_contamination_rate(
         total_drift_windows: int,
         admitted_poisoned_windows: int
     ) -> float:
-        """
-        Calculate baseline contamination: C_contam = (N_poisoned_admitted / N_total_drift) * 100%.
-        """
         if total_drift_windows <= 0:
             return 0.0
         return float((admitted_poisoned_windows / total_drift_windows) * 100.0)
@@ -41,10 +30,6 @@ class BenchmarkEvaluator:
         first_alert_time: Optional[datetime],
         first_technical_action_time: Optional[datetime]
     ) -> float:
-        """
-        Lead Time = t_first_technical_action - t_first_alert (in days).
-        Positive values indicate proactive detection before exfiltration.
-        """
         if not first_alert_time or not first_technical_action_time:
             return 0.0
         delta_seconds = (first_technical_action_time - first_alert_time).total_seconds()
@@ -57,9 +42,6 @@ class BenchmarkEvaluator:
         threshold: float,
         total_days: float
     ) -> float:
-        """
-        Calculate operational false alarm frequency per 1000 user-days.
-        """
         if total_days <= 0:
             return 0.0
         predicted_positives = (y_scores >= threshold)
@@ -72,9 +54,6 @@ class BenchmarkEvaluator:
         y_scores: np.ndarray,
         target_fpr: float = 0.01
     ) -> Tuple[float, float]:
-        """
-        Compute Average Precision (PR-AUC) and Recall at controlled False Positive Rate.
-        """
         if len(y_true) == 0 or np.sum(y_true) == 0:
             return 0.0, 0.0
         desc_indices = np.argsort(y_scores)[::-1]

@@ -83,12 +83,6 @@ class KOutOfNFilter:
 
 
 class SequentialDecisionManager:
-    """
-    Unified sequential decision framework combining:
-    1. Theoretical anytime-valid conformal martingale;
-    2. Empirical persistent k-out-of-n buffer.
-    """
-
     def __init__(
         self,
         alpha_fpr: float = 0.01,
@@ -106,10 +100,6 @@ class SequentialDecisionManager:
         is_instant_alert: bool,
         is_clean_mature: bool = False
     ) -> Tuple[bool, str]:
-        """
-        Evaluate sequential stopping rules.
-        Returns: (is_confirmed_alert, decision_rationale).
-        """
         if is_clean_mature:
             self.martingale_detector.calibrate(risk_score)
         if self.use_conformal:

@@ -11,9 +11,6 @@ RiskMarkerType = Literal[
 
 
 class SemanticMarkerItem(BaseModel):
-    """
-    Structured marker element.
-    """
     model_config = ConfigDict(extra="forbid", frozen=True)
     marker_name: RiskMarkerType = Field(
         ..., 
@@ -43,11 +40,7 @@ class SemanticMarkerItem(BaseModel):
 
 
 class LLMSemanticAnalysisResponse(BaseModel):
-    """
-    Validated response of local LLM.
-    """
     model_config = ConfigDict(extra="forbid", frozen=True)
-
     markers: List[SemanticMarkerItem] = Field(
         default_factory=list,
         description="Semantic markers list"

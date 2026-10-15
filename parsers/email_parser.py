@@ -7,12 +7,6 @@ from core.models import CommunicationMessage
 
 
 class EmailMessageParser:
-    """
-    Parser for corporate email communications:
-    Processes CERT r4.2 email.csv format, extracts metadata, cleans quotes,
-    filters automated system mailboxes, and validates communication entities.
-    """
-
     DATETIME_FORMAT = "%m/%d/%Y %H:%M:%S"
     EMAIL_REGEX = re.compile(r"[\w\.-]+@[\w\.-]+\.[A-Za-z]{2,}")
     

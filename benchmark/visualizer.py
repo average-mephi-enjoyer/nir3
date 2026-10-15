@@ -5,18 +5,12 @@ import networkx as nx
 
 
 class BenchmarkVisualizer:
-    """
-    Renders publication-grade vector and raster plots for research reporting.
-    """
     @staticmethod
     def plot_communication_graph(
         ego_graph: nx.DiGraph,
         target_user: str,
         output_filepath: str = "output/communication_ego_graph.png"
     ) -> None:
-        """
-        Visualize ego-network topology around target employee with edge weights.
-        """
         os.makedirs(os.path.dirname(output_filepath), exist_ok=True)
         fig = plt.figure(figsize=(9, 8), dpi=300)
         if ego_graph.number_of_nodes() == 0:
@@ -55,9 +49,6 @@ class BenchmarkVisualizer:
         top_markers: Optional[List[str]] = None,
         output_filepath: str = "output/top_markers_dynamics.png"
     ) -> None:
-        """
-        Plot trajectories of top-3 representative markers alongside trusted baselines.
-        """
         os.makedirs(os.path.dirname(output_filepath), exist_ok=True)
         if not top_markers:
             top_markers = ["llm_access_focus", "llm_alienation", "pronoun_marker"]
@@ -93,9 +84,6 @@ class BenchmarkVisualizer:
         trusted_baseline_histories: Dict[str, List[float]],
         output_filepath: str = "output/multi_marker_dynamics.png"
     ) -> None:
-        """
-        Plot individual tracking trajectories across all tracked markers.
-        """
         os.makedirs(os.path.dirname(output_filepath), exist_ok=True)
         tracked_keys = list(marker_histories.keys())
         num_markers = len(tracked_keys)
@@ -134,9 +122,6 @@ class BenchmarkVisualizer:
         baseline_histories: Dict[str, List[float]],
         output_filepath: str = "output/cert_all_markers.png"
     ) -> None:
-        """
-        Render publication-grade 5x2 subplot grid covering all 10 tracked psycholinguistic markers.
-        """
         os.makedirs(os.path.dirname(output_filepath), exist_ok=True)
         tracked_keys = list(marker_histories.keys())
         num_markers = len(tracked_keys)
@@ -180,9 +165,6 @@ class BenchmarkVisualizer:
         technical_attack_day: Optional[int] = None,
         output_filepath: str = "output/ramp_drift_comparison.png"
     ) -> None:
-        """
-        Two-panel comparison of baseline contamination and early alert lead time.
-        """
         os.makedirs(os.path.dirname(output_filepath), exist_ok=True)
         fig, (ax1, ax2) = plt.subplots(nrows=2, ncols=1, figsize=(11, 7), dpi=300, sharex=True)
         ax1.plot(time_steps, ground_truth_drift, "k--", label="True Anomaly Drift (Ground Truth)", linewidth=1.8)

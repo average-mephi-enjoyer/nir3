@@ -6,10 +6,6 @@ from verification.mismatch_detector import MismatchAnalysisResult, SemanticTechn
 
 
 class TargetedRetrospectiveVerifier:
-    """
-    On-demand targeted verifier executing retrospective audit over sliding window [t - Delta_t, t].
-    Maintains a dual index mapping employee identifiers and email addresses.
-    """
     def __init__(
         self,
         retro_window_days: int = 7,
@@ -25,18 +21,12 @@ class TargetedRetrospectiveVerifier:
         self.mismatch_detector = SemanticTechnicalMismatchDetector(mismatch_threshold=mismatch_threshold)
 
     def register_user_mapping(self, user_id: str, email: str) -> None:
-        """
-        Register bidirectional link between CERT employee ID (e.g., AAM0658) and email.
-        """
         norm_user = user_id.strip().lower()
         norm_email = email.strip().lower()
         self.user_to_email_map[norm_user] = norm_email
         self.email_to_user_map[norm_email] = norm_user
 
     def register_telemetry_event(self, event: TelemetryEvent) -> None:
-        """
-        Ingest system telemetry event into user queue with historical retention cutoff.
-        """
         user_key = event.user_id.strip().lower()
         store = self.telemetry_store[user_key]
         store.append(event)
@@ -45,9 +35,6 @@ class TargetedRetrospectiveVerifier:
             store.popleft()
 
     def register_communication_message(self, message: CommunicationMessage, user_id: Optional[str] = None) -> None:
-        """
-        Ingest communication message indexed by sender email and resolved employee ID.
-        """
         sender_email = message.sender_id.strip().lower()
         resolved_uid = user_id.strip().lower() if user_id else self.email_to_user_map.get(sender_email, sender_email)
         for key in {sender_email, resolved_uid}:
@@ -58,10 +45,6 @@ class TargetedRetrospectiveVerifier:
                 store.popleft()
 
     def verify_alert_signal(self, signal: RiskSignal) -> MismatchAnalysisResult:
-        """
-        Perform retrospective targeted verification triggered by a first-stage psycholinguistic signal.
-        Audits window [signal.timestamp - retro_window, signal.timestamp].
-        """
         user_id = signal.employee_id.strip().lower()
         current_time = signal.timestamp
         start_time = current_time - self.retro_window

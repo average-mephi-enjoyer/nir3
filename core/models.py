@@ -6,7 +6,6 @@ import numpy as np
 
 @dataclass(slots=True)
 class CommunicationMessage:
-    """Communication event with sender email and optional user_id."""
     sender_id: str
     receiver_ids: List[str]
     timestamp: datetime
@@ -27,7 +26,6 @@ class CommunicationMessage:
 
 @dataclass(slots=True)
 class EmployeeContext:
-    """Operational and graph-based context of an employee within the observation window."""
     employee_id: str
     role: str = "general"
     indegree: float = 0.0
@@ -45,7 +43,6 @@ class EmployeeContext:
 
 @dataclass(slots=True)
 class MarkerVector:
-    """Combined feature vector (statistical NLP + LLM)."""
     pronoun_marker: float = 0.0
     syntactic_marker: float = 0.0
     activity_marker: float = 0.0
@@ -84,7 +81,6 @@ class MarkerVector:
 
 @dataclass(slots=True)
 class RiskSignal:
-    """Early warning signal output."""
     employee_id: str
     timestamp: datetime
     raw_markers: MarkerVector
@@ -96,7 +92,6 @@ class RiskSignal:
 
 @dataclass(slots=True)
 class TelemetryEvent:
-    """System telemetry event (CERT r4.2: logon, device, file, http)."""
     event_id: str
     user_id: str
     timestamp: datetime

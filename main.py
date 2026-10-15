@@ -206,7 +206,6 @@ def run_cert_dataset_evaluation(
     )
     markdown_table = BaselineBenchmarkRunner.format_markdown_table(comparison_rows)
     print("\n")
-    print("TABLE!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
     print(markdown_table)
     print("\n")
     with open("output/baseline_comparison.md", "w", encoding="utf-8") as f:

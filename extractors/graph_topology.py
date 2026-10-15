@@ -7,13 +7,6 @@ from core.models import CommunicationMessage, EmployeeContext
 
 
 class DynamicCommunicationGraph:
-    """
-    Time-decayed directed communication multigraph tracking:
-    - Ego-network centrality and reciprocity;
-    - Edge weight distribution (volume per recipient);
-    - External non-corporate domain communication leakage (exfiltration channel).
-    """
-
     CORPORATE_DOMAINS = {"dtaa.com"}
 
     def __init__(self, decay_window_days: int = 30):
@@ -93,10 +86,6 @@ class DynamicCommunicationGraph:
         return g
 
     def compute_advanced_topology(self, employee_id: str) -> Tuple[float, float, float, float, float]:
-        """
-        Calculates advanced topological and exfiltration metrics:
-        Returns: (indegree, outdegree, reciprocity, betweenness, external_traffic_ratio).
-        """
         matched_nodes = self._resolve_candidate_nodes(employee_id)
         if not matched_nodes:
             return 0.0, 0.0, 0.5, 0.0, 0.0

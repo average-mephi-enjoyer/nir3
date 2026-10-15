@@ -7,12 +7,6 @@ from profiling.quarantine import QuarantineBuffer
 
 
 class ContaminationResistantProfile:
-    """
-    Dual-circuit dynamic profile resistant to poison injection and slow drift.
-    Combines individual statistics with empirical Bayesian role priors and
-    total variance decomposition: Var[X] = E[Var[X|R]] + Var[E[X|R]].
-    """
-
     TRACKED_MARKERS: List[str] = [
         "pronoun_marker",
         "syntactic_marker",
@@ -68,9 +62,6 @@ class ContaminationResistantProfile:
 
     @classmethod
     def marker_vector_to_dict(cls, markers: MarkerVector) -> Dict[str, float]:
-        """
-        Extract numerical features from MarkerVector safely into a dictionary.
-        """
         raw_dict = {
             "pronoun_marker": markers.pronoun_marker,
             "syntactic_marker": markers.syntactic_marker,
@@ -90,10 +81,6 @@ class ContaminationResistantProfile:
         return clean_dict
 
     def get_mixed_parameters(self, marker_name: str) -> Tuple[float, float]:
-        """
-        Calculate mixed expected value and safe standard deviation via Law of Total Variance.
-        Var_total = eta * Var_ind + (1 - eta) * Var_role + eta * (1 - eta) * (mu_ind - mu_role)^2.
-        """
         mu_ind = self.trusted_means.get(marker_name, 0.0)
         var_ind = max(self.trusted_variances.get(marker_name, self.min_variance), self.min_variance)
         role_prior = self.role_priors.get(marker_name, {})
@@ -110,9 +97,6 @@ class ContaminationResistantProfile:
         return mu_mixed, safe_std
 
     def compute_dynamic_thresholds(self, team_workload_factor: float) -> Tuple[float, float]:
-        """
-        Adjust alert and quarantine thresholds under organizational stress.
-        """
         clamped_factor = float(np.clip(team_workload_factor, 0.0, 1.0))
         threshold_multiplier = 1.0 + 0.6 * clamped_factor
         adapted_h_quarantine = self.base_h_quarantine * threshold_multiplier
@@ -124,9 +108,6 @@ class ContaminationResistantProfile:
         markers: MarkerVector,
         team_workload_factor: float = 0.0
     ) -> Tuple[Dict[str, float], float, bool]:
-        """
-        Compute standardized Z-scores and root-mean-square composite risk.
-        """
         mark_dict = self.marker_vector_to_dict(markers)
         z_scores: Dict[str, float] = {}
         total_sq_dev = 0.0
@@ -151,12 +132,6 @@ class ContaminationResistantProfile:
         timestamp: datetime,
         team_workload_factor: float = 0.0
     ) -> Tuple[Dict[str, float], float, bool]:
-        """
-        Profile execution cycle:
-        1. Calculate current risk metrics against baseline.
-        2. Enqueue in the quarantine buffer.
-        3. Extract and admit mature clean observations to the baseline model.
-        """
         z_scores, risk_score, is_alert = self.compute_deviations(markers, team_workload_factor)
         dynamic_h_quarantine, _ = self.compute_dynamic_thresholds(team_workload_factor)
         self.quarantine.h_quarantine = dynamic_h_quarantine
@@ -173,10 +148,6 @@ class ContaminationResistantProfile:
         return z_scores, risk_score, is_alert
 
     def _update_trusted_baseline(self, clean_marker_dict: Dict[str, float]) -> None:
-        """
-        Exponential Moving Average (EMA) update strictly from mature clean observations.
-        Increments the observation counter exactly once per admitted observation.
-        """
         if self.observations_count == 0 and not self.role_priors:
             for m in self.TRACKED_MARKERS:
                 self.trusted_means[m] = clean_marker_dict[m]
@@ -195,7 +166,4 @@ class ContaminationResistantProfile:
         self.observations_count += 1
 
     def freeze_on_alert(self, alert_time: datetime) -> int:
-        """
-        Rollback and lock the quarantine buffer upon alert generation.
-        """
         return self.quarantine.purge_suspicious_horizon(start_time=alert_time)

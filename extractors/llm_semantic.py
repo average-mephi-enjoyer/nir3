@@ -33,11 +33,6 @@ class TextSanitizer:
 
 
 class LLMSemanticExtractor(IFeatureExtractor):
-    """
-    Semantic extractor utilizing structured JSON schema outputs from local LLM,
-    or smooth continuous frequency density over the Insider Language Index (ILI) ontology.
-    """
-
     SYSTEM_PROMPT = (
         "You are an objective psycholinguistic analysis module for corporate communications.\n"
         "Your task is to analyze text strictly against an established Insider Language Index (ILI) ontology.\n"
@@ -136,10 +131,6 @@ class LLMSemanticExtractor(IFeatureExtractor):
         return None
 
     def _smooth_density_transfer(self, hits: int, total_words: int, gain: float = 25.0) -> float:
-        """
-        Continuous smooth sigmoid scaling mapping token frequency density to [0.0, 1.0].
-        Eliminates discrete 0.0 / 0.35 / 0.70 staircases.
-        """
         if hits == 0 or total_words == 0:
             return 0.0
         density = hits / float(total_words + 5)

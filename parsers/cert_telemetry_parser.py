@@ -6,21 +6,10 @@ from core.models import TelemetryEvent
 
 
 class TelemetryLogProcessor:
-    """
-    Parser for system telemetry of the operating environment (CERT r4.2):
-    - logon.csv: logon/logoff events;
-    - device.csv: external storage connect/disconnect (USB);
-    - file.csv: file access and exfiltration events;
-    - http.csv: network activity and cloud storage accesses.
-    """
-
     DATETIME_FORMAT = "%m/%d/%Y %H:%M:%S"
 
     @classmethod
     def parse_timestamp(cls, raw_ts: Optional[str]) -> Optional[datetime]:
-        """
-        Fast scalar timestamp parser optimized for the CERT r4.2 datetime format.
-        """
         if not raw_ts:
             return None
         cleaned_ts = raw_ts.strip()
@@ -33,9 +22,6 @@ class TelemetryLogProcessor:
             return None
         
     def stream_logon_events(self, filepath: str) -> Iterator[TelemetryEvent]:
-        """
-        Stream events from CERT logon.csv (id, date, user, pc, activity).
-        """
         if not os.path.exists(filepath):
             return
         with open(filepath, mode="r", encoding="utf-8", errors="replace") as f:
@@ -58,9 +44,6 @@ class TelemetryLogProcessor:
                 )
 
     def stream_device_events(self, filepath: str) -> Iterator[TelemetryEvent]:
-        """
-        Stream events from CERT device.csv (id, date, user, pc, activity).
-        """
         if not os.path.exists(filepath):
             return
         with open(filepath, mode="r", encoding="utf-8", errors="replace") as f:
@@ -83,10 +66,6 @@ class TelemetryLogProcessor:
                 )
 
     def stream_file_events(self, filepath: str) -> Iterator[TelemetryEvent]:
-        """
-        Stream events from CERT file.csv (id, date, user, pc, filename, content).
-        Guaranteed generator object.
-        """
         if not os.path.exists(filepath):
             return
         with open(filepath, mode="r", encoding="utf-8", errors="replace") as f:
@@ -112,9 +91,6 @@ class TelemetryLogProcessor:
                 )
 
     def stream_http_events(self, filepath: str) -> Iterator[TelemetryEvent]:
-        """
-        Stream events from CERT http.csv (id, date, user, pc, url, content).
-        """
         if not os.path.exists(filepath):
             return
         with open(filepath, mode="r", encoding="utf-8", errors="replace") as f:

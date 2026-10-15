@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 import numpy as np
 
 
@@ -14,9 +14,6 @@ class BaselineComparisonRow:
 
 
 class BaselineBenchmarkRunner:
-    """
-    Computes comparative metrics across competing detection paradigms.
-    """
     @staticmethod
     def evaluate_all(
         y_true: np.ndarray,

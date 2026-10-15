@@ -1,17 +1,12 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-import math
-from typing import Dict, List, Optional
+from typing import List, Optional
 import numpy as np
-
 from core.models import CommunicationMessage, MarkerVector, TelemetryEvent
 
 
 @dataclass
 class SyntheticScenario:
-    """
-    Time-series scenario of synthetic behavioral drift and anomaly.
-    """
     scenario_id: str
     scenario_type: str  
     target_user: str
@@ -24,10 +19,6 @@ class SyntheticScenario:
 
 
 class DriftInjector:
-    """
-    Synthetic anomaly and behavioral trajectory generator.
-    """
-
     def __init__(self, seed: int = 42):
         np.random.seed(seed)
 
@@ -37,9 +28,6 @@ class DriftInjector:
         start_time: datetime,
         duration_days: int = 30
     ) -> SyntheticScenario:
-        """
-        Acute exfiltration scenario: sudden conflict and data export to USB.
-        """
         scenario = SyntheticScenario(
             scenario_id=f"acute_{user_id}",
             scenario_type="acute_exfiltration",
@@ -49,7 +37,6 @@ class DriftInjector:
             t_first_action=start_time + timedelta(days=20),
             is_malicious=True
         )
-
         for day in range(duration_days):
             current_date = start_time + timedelta(days=day, hours=10)
             if day < 15:
@@ -108,10 +95,6 @@ class DriftInjector:
         l_ramp_days: int = 30,
         delta_max: float = 3.5
     ) -> SyntheticScenario:
-        """
-        Slow ramp drift scenario: gradual increase in toxicity and alienation, leading to policy violations.
-        Stress-test for self-normalization and baseline contamination.
-        """
         t_drift = start_time + timedelta(days=10)
         t_action = start_time + timedelta(days=45)
         scenario = SyntheticScenario(
@@ -163,10 +146,6 @@ class DriftInjector:
         start_time: datetime,
         duration_days: int = 40
     ) -> SyntheticScenario:
-        """
-        Negative Stress Control:
-        exhaustion, overload, crisis and deadline, but WITHOUT technical violations and malicious intent.
-        """
         scenario = SyntheticScenario(
             scenario_id=f"stress_{user_id}",
             scenario_type="stress_negative_control",
