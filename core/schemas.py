@@ -1,5 +1,5 @@
 from typing import List, Literal, Optional
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, model_validator, ValidationInfo
 
 RiskMarkerType = Literal[
     "organizational_alienation",
@@ -14,7 +14,7 @@ class SemanticMarkerItem(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     marker_name: RiskMarkerType = Field(
         ..., 
-        description="Semantic marker type (ILI)"
+        description="Author-defined semantic category, not an original ILI item"
     )
     score: float = Field(
         ..., 
@@ -59,3 +59,15 @@ class LLMSemanticAnalysisResponse(BaseModel):
         default="1.1", 
         description="Schema version"
     )
+
+    @model_validator(mode="after")
+    def validate_evidence(self, info: ValidationInfo):
+        names = [item.marker_name for item in self.markers]
+        if len(set(names)) != len(names):
+            raise ValueError("Duplicate semantic markers")
+        if info.context and "text" in info.context:
+            text = info.context["text"]
+            for item in self.markers:
+                if item.evidence_span not in text:
+                    raise ValueError("Evidence is not an exact span of the analyzed text")
+        return self

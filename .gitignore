@@ -1,7 +1,8 @@
 __pycache__/
 *.py[cod]
 *$py.class
-
+.github/
+.ruff_cache/
 *.so
 
 .Python
@@ -47,3 +48,6 @@ archive/
 
 .DS_Store
 Thumbs.db
+
+local_llm/
+*.gguf

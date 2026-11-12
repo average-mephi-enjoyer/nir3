@@ -19,6 +19,13 @@ class TargetedRetrospectiveVerifier:
         self.user_to_email_map: Dict[str, str] = {}
         self.email_to_user_map: Dict[str, str] = {}
         self.mismatch_detector = SemanticTechnicalMismatchDetector(mismatch_threshold=mismatch_threshold)
+        self.source_status = dict.fromkeys(("file", "device", "http", "logon"), "not_loaded")
+        self.allowed_categories = {}
+
+    def register_source(self, source, status):
+        if status not in {"available", "missing", "incomplete", "not_loaded"}:
+            raise ValueError("Unknown source availability")
+        self.source_status[source] = status
 
     def register_user_mapping(self, user_id: str, email: str) -> None:
         norm_user = user_id.strip().lower()
@@ -42,10 +49,10 @@ class TargetedRetrospectiveVerifier:
         user_id = signal.employee_id.strip().lower()
         current_time = signal.timestamp
         start_time = current_time - self.retro_window
-        user_events = [
+        user_events = sorted([
             e for e in self.telemetry_store.get(user_id, [])
             if start_time <= e.timestamp <= current_time
-        ]
+        ], key=lambda e: e.timestamp)
         email_alias = self.user_to_email_map.get(user_id, user_id)
         candidate_messages = self.message_store.get(user_id, deque())
         if not candidate_messages and email_alias != user_id:
@@ -58,5 +65,7 @@ class TargetedRetrospectiveVerifier:
             user_id=user_id,
             messages=user_messages,
             telemetry_events=user_events,
-            current_time=current_time
+            current_time=current_time,
+            source_status=dict(self.source_status),
+            allowed_categories=self.allowed_categories.get(user_id)
         )

@@ -61,9 +61,6 @@ class DynamicCommunicationGraph:
         candidates = {norm}
         for alias in self.user_aliases.get(norm, set()):
             candidates.add(alias)
-        for node in list(self.adjacency_counts.keys()):
-            if norm in node:
-                candidates.add(node)
         return [c for c in sorted(candidates, key=lambda c: (c != norm, c)) if c in self.adjacency_counts or any(c in tgts for tgts in self.adjacency_counts.values())]
 
     def build_ego_graph(self, employee_id: str, radius: int = 2) -> nx.DiGraph:
@@ -114,7 +111,15 @@ class DynamicCommunicationGraph:
         betweenness = float(betweenness_dict.get(root_node, 0.0))
         return in_degree, out_degree, reciprocity, betweenness, external_ratio
 
-    def update_context(self, context: EmployeeContext) -> EmployeeContext:
+    def update_context(self, context: EmployeeContext, include_betweenness=True) -> EmployeeContext:
+        if not include_betweenness:
+            root = self.canonical_users.get(context.employee_id, context.employee_id)
+            outgoing = self.adjacency_counts.get(root, {})
+            incoming = {src: targets[root] for src, targets in self.adjacency_counts.items() if root in targets}
+            context.outdegree, context.indegree = float(sum(outgoing.values())), float(sum(incoming.values()))
+            context.reciprocity = (len(set(outgoing) & set(incoming)) + 1.) / (len(outgoing) + 2.)
+            context.external_ratio = sum(v for k, v in outgoing.items() if self._is_external_address(k)) / max(1., context.outdegree)
+            return context
         in_deg, out_deg, recip, betw, ext_ratio = self.compute_advanced_topology(context.employee_id)
         context.indegree = in_deg
         context.outdegree = out_deg

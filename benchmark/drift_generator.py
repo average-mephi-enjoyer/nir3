@@ -184,33 +184,45 @@ class DriftInjector:
         from datetime import timezone
         from benchmark.baseline_comparison import FeatureObservation
         from profiling.workload_filter import TeamWorkloadContextTracker
-        if kind not in {"ramp", "step", "adaptive", "role_change", "stress", "burnout", "normal"}:
+        if kind == "adaptive":
+            kind = "ema_proxy_drift"
+        if kind not in {"ramp", "step", "ema_proxy_drift", "role_change", "stress", "burnout", "normal", "very_slow", "false_alert_then_attack"}:
             raise ValueError("Unknown feature scenario")
         rng = np.random.default_rng(seed)
+        role_rng = np.random.default_rng(seed + 1000000)
+        role_reference = role_rng.normal(.3 + .05 * intensity, .05, (120, 10))
+        new_prior = {m: {"mean": float(role_reference[:, i].mean()), "variance": float(role_reference[:, i].var(ddof=1))}
+                     for i, m in enumerate(MarkerVector.feature_names())}
         origin = datetime(2020, 1, 1, tzinfo=timezone.utc)
         training, calibration, testing = [], [], []
         proxy = np.full(10, 0.3)
         workload_tracker = TeamWorkloadContextTracker()
         for day in range(134 + duration_days):
             values = rng.normal(0.3, 0.05, 10)
+            clean_values = values.copy()
             index = day - 134
             elapsed = index - 30
             label, workload = 0, 0.0
             if elapsed >= 0:
-                if kind == "ramp":
+                if kind in {"ramp", "very_slow"}:
                     values += 0.05 * intensity * min(1.0, (elapsed + 1) / drift_days)
                     label = 1
-                elif kind == "step":
+                elif kind in {"step", "false_alert_then_attack"}:
                     values += 0.05 * intensity
                     label = 1
-                elif kind == "adaptive":
+                elif kind == "ema_proxy_drift":
                     values = proxy + 0.05 * intensity / 4 + rng.normal(0, 0.01, 10)
                     label = 1
                 elif kind == "role_change":
                     values += 0.05 * intensity
+                    clean_values = values.copy()
                 elif kind in {"stress", "burnout"} and elapsed < drift_days:
                     for marker in (1, 3, 5, 9):
                         values[marker] += 0.05 * intensity
+                    clean_values = values.copy()
+            if kind == "false_alert_then_attack" and 5 <= index <= 9:
+                values += .6
+                clean_values = values.copy()
             timestamp = origin + timedelta(days=day)
             for peer in ("peer_a", "peer_b"):
                 intensity_peer = 5.0 if kind == "stress" and 0 <= elapsed < drift_days else 1.0
@@ -221,16 +233,21 @@ class DriftInjector:
             proxy += 0.05 * (values - proxy)
             vector = MarkerVector(**dict(zip(MarkerVector.feature_names(), values)))
             observation = FeatureObservation(origin + timedelta(days=day), vector, label, workload, f"{kind}-{seed}-{day}")
+            observation.clean_markers = MarkerVector(**dict(zip(MarkerVector.feature_names(), clean_values)))
+            observation.role = target_role
+            if kind == "role_change" and elapsed == 0:
+                observation.role_confirmed = True
+                observation.role_prior = new_prior
             if day < 60:
                 training.append(observation)
             elif day < 134:
                 calibration.append(observation)
             elif day >= 134:
                 testing.append(observation)
-        malicious = kind in {"ramp", "step", "adaptive"}
+        malicious = kind in {"ramp", "step", "ema_proxy_drift", "very_slow", "false_alert_then_attack"}
         start = origin + timedelta(days=164) if malicious else None
         action = start + timedelta(days=drift_days) if malicious else None
-        reference = rng.normal(0.3, 0.05, (120, 10))
+        reference = role_rng.normal(0.3, 0.05, (120, 10))
         priors = {marker: {"mean": float(reference[:, i].mean()), "variance": float(reference[:, i].var(ddof=1))}
                   for i, marker in enumerate(MarkerVector.feature_names())}
         return training, calibration, testing, priors, start, action

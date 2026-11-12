@@ -14,12 +14,15 @@ class SlidingTimeWindow:
         self.pending = {}
         self.reply_latencies = deque()
         self.last_timestamp = None
+        self.first_timestamp = None
 
     def add_message(self, message):
         timestamp = message.timestamp
         if self.last_timestamp is not None and timestamp < self.last_timestamp:
             raise ValueError("Messages must be chronological")
         self.last_timestamp = timestamp
+        if self.first_timestamp is None:
+            self.first_timestamp = timestamp
         sender = message.sender_id.lower()
         recipients = {r.lower() for r in message.receiver_ids}
         is_sender = (message.sender_user_id or "").lower() == self.employee_id or sender == self.email
@@ -51,6 +54,9 @@ class SlidingTimeWindow:
             return 0.0, 0.0, 0.0, 0.0
         result = []
         for days in (1, 7, 30, 90):
+            if self.last_timestamp - self.first_timestamp < timedelta(days=2 * days):
+                result.append(float("nan"))
+                continue
             boundary = self.last_timestamp - timedelta(days=days)
             previous = boundary - timedelta(days=days)
             current = sum(1 for ts, kind in self.events if ts > boundary and kind == "sent")
@@ -73,4 +79,7 @@ class SlidingTimeWindow:
         return EmployeeContext(employee_id=self.employee_id, role=self.role, mean_reply_time=mean,
                                median_reply_time=median, reply_time_std=std, daily_activity_change=daily,
                                weekly_activity_change=weekly, monthly_activity_change=monthly,
-                               quarterly_activity_change=quarterly)
+                               quarterly_activity_change=quarterly,
+                               reply_time_available=len(self.reply_latencies) >= 2,
+                               activity_available={name: math.isfinite(value) for name, value in
+                                   zip(("daily", "weekly", "monthly", "quarterly"), (daily, weekly, monthly, quarterly))})

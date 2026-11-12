@@ -15,6 +15,41 @@ class EvaluationMetricsResult:
 
 class BenchmarkEvaluator:
     @staticmethod
+    def calendar_normal_exposure(start, end, scenario_start=None, scenario_end=None, intervals=None):
+        """Elapsed calendar days in [start,end), excluding known scenario interval."""
+        total = (end - start).total_seconds() / 86400
+        if total <= 0:
+            raise ValueError("Positive monitoring interval required")
+        intervals = intervals if intervals is not None else ([(scenario_start, scenario_end)] if scenario_start else [])
+        merged = []
+        for left, right in sorted((max(start, left), min(end, right or end)) for left, right in intervals):
+            if right <= left:
+                continue
+            if merged and left <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(right, merged[-1][1]))
+            else:
+                merged.append((left, right))
+        total -= sum((right - left).total_seconds() / 86400 for left, right in merged)
+        return total
+
+    @staticmethod
+    def oracle_errors(training, observations, profile, alpha):
+        """Clean counterfactual EMA, evaluation only; unavailable on CERT."""
+        if any(o.clean_markers is None for o in observations):
+            return float("nan"), float("nan")
+        names = sorted(profile.trained_markers)
+        mean = np.array([np.mean([getattr(o.markers, m) for o in training if m not in o.markers.unavailable]) for m in names])
+        variance = np.array([max(np.var([getattr(o.markers, m) for o in training if m not in o.markers.unavailable], ddof=1), profile.min_variance) for m in names])
+        for observation in observations:
+            values = np.array([getattr(observation.clean_markers, m) for m in names])
+            delta = values - mean
+            mean += alpha * delta
+            variance = np.maximum((1 - alpha) * (variance + alpha * delta ** 2), profile.min_variance)
+        actual_mean = np.array([profile.trusted_means[m] for m in names])
+        actual_var = np.array([profile.trusted_variances[m] for m in names])
+        return float(np.sqrt(np.mean((actual_mean - mean) ** 2 / variance))), float(np.sqrt(np.mean(((actual_var - variance) / variance) ** 2)))
+
+    @staticmethod
     def calculate_contamination_rate(total_drift_windows, admitted_poisoned_windows):
         if total_drift_windows <= 0:
             return float("nan")

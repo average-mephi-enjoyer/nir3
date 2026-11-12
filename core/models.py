@@ -41,6 +41,8 @@ class EmployeeContext:
     weekly_activity_change: float = 0.0
     monthly_activity_change: float = 0.0
     quarterly_activity_change: float = 0.0
+    reply_time_available: bool = False
+    activity_available: Dict[str, bool] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -56,6 +58,11 @@ class MarkerVector:
     llm_access_focus: float = 0.0
     llm_conflict: float = 0.0
     llm_uncertainty: float = 1.0
+    unavailable: set[str] = field(default_factory=set)
+    semantic_metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def available_names(self):
+        return [name for name in self.feature_names() if name not in self.unavailable]
 
     def to_numpy(self) -> np.ndarray:
         return np.array([

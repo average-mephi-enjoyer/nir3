@@ -15,6 +15,8 @@ class IncidentTruth:
     first_action_type: str = ""
     email_ids: set = field(default_factory=set)
     details: str = ""
+    label_source: str = "CERT r4.2 answer key"
+    label_quality: str = "annotated_event; interval membership alone is unknown"
 
     def label(self, message):
         if message.message_id in self.email_ids:
@@ -22,6 +24,18 @@ class IncidentTruth:
         if self.start <= message.timestamp <= self.end:
             return -1
         return 0
+
+
+class UserIncidents(list):
+    """Keep every scenario; singular attributes are only safe for a single scenario."""
+    def label(self, message):
+        labels = [incident.label(message) for incident in self]
+        return 1 if 1 in labels else -1 if -1 in labels else 0
+
+    def __getattr__(self, name):
+        if len(self) != 1:
+            raise ValueError("Select an individual scenario before reading its boundaries")
+        return getattr(self[0], name)
 
 
 def load_cert_ground_truth(answers_filepath):
@@ -52,16 +66,15 @@ def load_cert_ground_truth(answers_filepath):
                             incident.first_action = timestamp
                             incident.first_action_id = event_id
                             incident.first_action_type = kind
-            result[user] = incident
+            result.setdefault(user, UserIncidents()).append(incident)
     return result
 
 
 def export_ground_truth(truth, users, output):
-    fields = ["user", "scenario", "start", "first_action", "end", "first_action_id", "first_action_type", "details"]
+    fields = ["user", "scenario", "start", "first_action", "end", "first_action_id", "first_action_type", "details", "label_source", "label_quality"]
     with Path(output).open("w", encoding="utf-8", newline="") as destination:
         writer = csv.DictWriter(destination, fieldnames=fields)
         writer.writeheader()
         for user in users:
-            incident = truth.get(user.lower())
-            if incident:
+            for incident in truth.get(user.lower(), []):
                 writer.writerow({key: getattr(incident, key) for key in fields})

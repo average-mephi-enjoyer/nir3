@@ -53,15 +53,21 @@ class SpacyStatisticalExtractor(IFeatureExtractor):
     def compute_markers(self, message: CommunicationMessage, context: Optional[EmployeeContext] = None) -> MarkerVector:
         text = message.text_content
         vector = MarkerVector()
+        vector.unavailable.update({"activity_marker", "response_marker", "social_marker"})
         if not text:
             return vector
         vector.pronoun_marker = self.compute_pronoun_marker(text)
         vector.syntactic_marker = self.compute_syntactic_complexity(text)
         if context is not None:
+            vector.unavailable.discard("social_marker")
             act_change = abs(context.daily_activity_change)
-            vector.activity_marker = float(np.clip(act_change / 3.0, 0.0, 1.0))
+            if context.activity_available.get("daily", False) and math.isfinite(act_change):
+                vector.activity_marker = float(np.clip(act_change / 3.0, 0.0, 1.0))
+                vector.unavailable.discard("activity_marker")
             rep_std = context.reply_time_std
             vector.response_marker = float(np.clip(rep_std / 24.0, 0.05, 0.95))
+            if context.reply_time_available:
+                vector.unavailable.discard("response_marker")
             ext_ratio = context.external_ratio
             out_deg = context.outdegree
             structural_isolation = 1.0 / (1.0 + math.log1p(max(out_deg, 0.0)))

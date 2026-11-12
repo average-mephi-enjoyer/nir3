@@ -192,7 +192,7 @@ class RegressionTests(unittest.TestCase):
     def test_benchmark_five_methods_and_independent_splits(self):
         arguments = DriftInjector().generate_feature_scenario("step", duration_days=60, seed=21)
         rows, traces = BaselineBenchmarkRunner.evaluate_stream(*arguments)
-        self.assertEqual(len(rows), 5)
+        self.assertEqual(len(rows), 6)
         self.assertEqual(rows[0].admitted_total, 0)
         self.assertEqual(rows[1].admitted_total, len(arguments[2]))
         self.assertEqual(len(traces["Protected"].scores), len(arguments[2]))

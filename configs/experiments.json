@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "repetitions": 30,
+  "tune_seed_start": 1000,
+  "test_seed_start": 10000,
+  "bootstrap_seed": 20261112,
+  "bootstrap_repetitions": 2000,
+  "duration_days": 180,
+  "scenarios": ["ramp", "step", "ema_proxy_drift", "role_change", "stress", "burnout", "normal", "very_slow", "false_alert_then_attack"],
+  "settings_A": [[30, 3.0], [90, 1.0], [90, 3.0], [90, 6.0], [360, 0.5]],
+  "settings_B": [[90, 3.0]],
+  "parameters": {"alpha": 0.05, "quarantine_days": 14, "anchor_limit": 2.0, "anchor_variance_ratio": 9.0, "shrinkage_tau": 20.0, "threshold_quantile": 0.99, "calibration_window": 74},
+  "sensitivity": {"alpha": [0.01, 0.1], "quarantine_days": [7, 28], "anchor_limit": [1.0, 3.0], "threshold_quantile": [0.95, 1.0], "shrinkage_tau": [5.0, 50.0], "calibration_window": [30, 60]},
+  "notes": "30 independent seed clusters per cell; exploratory intervals, not narrow-error guarantees. Same seed reused across settings is clustered in pooled summaries. Very slow drift does not reach its final amplitude within observation period."
+}

@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "endpoint_url": "http://127.0.0.1:8081/v1/chat/completions",
+  "model_name": "nir3-qwen2.5-7b-instruct-q4_k_m",
+  "timeout_seconds": 600,
+  "max_tokens": 768,
+  "seed": 20261112,
+  "context_size": 4096,
+  "threads": 6,
+  "threads_batch": 8,
+  "minimum_free_ram_gib": 7,
+  "runtime_tag": "b12317",
+  "model_repository": "Qwen/Qwen2.5-7B-Instruct-GGUF",
+  "model_revision": "bb5d59e06d9551d752d08b292a50eb208b07ab1f",
+  "artifacts": [
+    {
+      "kind": "runtime",
+      "path": "downloads/llama-b12317-bin-win-cpu-x64.zip",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12317/llama-b12317-bin-win-cpu-x64.zip",
+      "size": 25084543,
+      "sha256": "96e5008bde3367ef049a0f327e0674b149a4e3385af90b3f046cc7fe0301d322"
+    },
+    {
+      "kind": "model",
+      "path": "models/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf",
+      "url": "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/bb5d59e06d9551d752d08b292a50eb208b07ab1f/qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf",
+      "size": 3993201344,
+      "sha256": "dfce12e3862a5283ccfb88221b48480e58745165de856439950d0f22590580db"
+    },
+    {
+      "kind": "model",
+      "path": "models/qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf",
+      "url": "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct-GGUF/resolve/bb5d59e06d9551d752d08b292a50eb208b07ab1f/qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf",
+      "size": 689872288,
+      "sha256": "539cf93f78e887edea1c04e2d7d8cdaca9d01dae9c9025bcb8accbe29df3d72a"
+    }
+  ]
+}

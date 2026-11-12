@@ -58,12 +58,13 @@ class KOutOfNFilter:
 
 
 class SequentialDecisionManager:
-    def __init__(self, alpha_fpr=0.01, k=3, n=5, use_conformal=True):
+    def __init__(self, alpha_fpr=0.01, k=3, n=5, use_conformal=False):
         self.use_conformal = use_conformal
         self.martingale_detector = ConformalMartingaleDetector(alpha_fpr=alpha_fpr)
         self.k_of_n_filter = KOutOfNFilter(k=k, n=n)
         self.frozen = False
         self.active_alert = False
+        self.state = "ACTIVE"
 
     def process_observation(self, risk_score, is_instant_alert, is_clean_mature=False):
         if self.frozen:
@@ -87,10 +88,26 @@ class SequentialDecisionManager:
 
     def freeze(self):
         self.frozen = True
+        self.state = "FROZEN"
+
+    def freeze_profile(self, profile, timestamp):
+        self.state = "ALERT_PENDING_REVIEW"
+        profile.freeze_on_alert(timestamp)
+        self.freeze()
+
+    def review_profile(self, profile, clean_observations, calibration_scores, timestamp, approved=False):
+        if not approved or len(calibration_scores) < 10 or not all(math.isfinite(v) for v in calibration_scores):
+            raise ValueError("Explicit review and independent finite calibration scores required")
+        profile.resume_after_review(clean_observations, approved=True, timestamp=timestamp)
+        self.resume_after_review()
+        for score in calibration_scores:
+            self.martingale_detector.calibrate(score)
 
     def resume_after_review(self):
+        self.state = "RESUMING"
         self.frozen = False
         self.active_alert = False
         self.martingale_detector.reset_after_alert()
         self.martingale_detector.calibration_scores.clear()
         self.k_of_n_filter.reset()
+        self.state = "ACTIVE"

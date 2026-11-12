@@ -1,40 +1,44 @@
-from collections import defaultdict, deque
+from collections import defaultdict
 from datetime import timedelta
-import numpy as np
+import math
 
 
 class TeamWorkloadContextTracker:
+    """Calendar-day peer load. Uses only completed days, with a one-day lag."""
     def __init__(self, window_days=7, baseline_window_days=30):
         if not 0 < window_days < baseline_window_days:
             raise ValueError("Invalid workload windows")
-        self.window = timedelta(days=window_days)
-        self.baseline_window = timedelta(days=baseline_window_days)
-        self.role_events = defaultdict(deque)
+        self.window_days, self.baseline_days = window_days, baseline_window_days
+        self.daily = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
+        self.first_seen = {}
         self.last_timestamp = None
+        self.cache = {}
 
     def register_role_activity(self, role, timestamp, intensity=1.0, employee_id=None):
         if self.last_timestamp is not None and timestamp < self.last_timestamp:
             raise ValueError("Workload events must be chronological")
+        if not math.isfinite(intensity) or intensity < 0:
+            raise ValueError("Invalid activity intensity")
         self.last_timestamp = timestamp
-        if not employee_id:
-            return
-        self.role_events[role].append((timestamp, float(intensity), employee_id.lower()))
-        cutoff = timestamp - self.baseline_window
-        for events in self.role_events.values():
-            while events and events[0][0] < cutoff:
-                events.popleft()
+        if employee_id:
+            user = employee_id.lower()
+            self.first_seen.setdefault((role, user), timestamp.date())
+            self.daily[role][timestamp.date()][user] += intensity
 
     def get_role_workload_factor(self, role, current_time, exclude_user=None):
-        cutoff = current_time - self.baseline_window
-        recent = current_time - self.window
-        events = [(ts, value, user) for ts, value, user in self.role_events.get(role, [])
-                  if cutoff <= ts < current_time and user != (exclude_user or "").lower()]
-        if len({user for _, _, user in events}) < 2:
-            return 0.0
-        recent_sum = sum(value for ts, value, _ in events if ts >= recent)
-        past_sum = sum(value for ts, value, _ in events if ts < recent)
-        past_rate = past_sum / (self.baseline_window - self.window).days
-        if past_rate <= 0:
-            return 0.0
-        surge = (recent_sum / self.window.days - past_rate) / past_rate
-        return float(np.clip(surge / 2, 0, 1))
+        date = current_time.date()
+        key = role, date
+        if key not in self.cache:
+            counts = defaultdict(lambda: [0., 0.])
+            for days in range(1, self.baseline_days + 1):
+                for user, value in self.daily[role].get(date - timedelta(days=days), {}).items():
+                    counts[user][0 if days <= self.window_days else 1] += value
+            eligible = {user: values for user, values in counts.items() if min(values) > 0 and
+                        self.first_seen[(role, user)] <= date - timedelta(days=self.baseline_days)}
+            self.cache[key] = eligible
+        peers = [values for user, values in self.cache[key].items() if user != (exclude_user or "").lower()]
+        if len(peers) < 2:
+            return 0.
+        recent = sum(v[0] for v in peers) / self.window_days
+        past = sum(v[1] for v in peers) / (self.baseline_days - self.window_days)
+        return max(0., min(1., (recent / past - 1) / 2)) if past else 0.

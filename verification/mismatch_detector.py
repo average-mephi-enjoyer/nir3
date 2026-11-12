@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 import re
 from typing import Dict, List, Set
@@ -17,6 +17,9 @@ class MismatchAnalysisResult:
     is_suspicious_mismatch: bool
     threat_severity: str
     explanation: str
+    evidence_ids: List[str] = field(default_factory=list)
+    source_status: dict = field(default_factory=dict)
+    uncertainty: str = "No authorization or confirmed-violation evidence"
 
 
 class SemanticTechnicalMismatchDetector:
@@ -73,10 +76,12 @@ class SemanticTechnicalMismatchDetector:
         user_id: str,
         messages: List[CommunicationMessage],
         telemetry_events: List[TelemetryEvent],
-        current_time: datetime
+        current_time: datetime,
+        allowed_categories=None,
+        source_status=None
     ) -> MismatchAnalysisResult:
         stated_categories = self.extract_stated_categories(messages)
-        file_events = [e for e in telemetry_events if e.event_type == "file_transfer"]
+        file_events = [e for e in telemetry_events if e.event_type in {"file_activity", "file_transfer"}]
         usb_events = [e for e in telemetry_events if "device_connect" in e.event_type]
         has_usb = len(usb_events) > 0
         meaningful_accessed: List[str] = []
@@ -88,19 +93,21 @@ class SemanticTechnicalMismatchDetector:
             meaningful_accessed.append(target)
             target_lower = target.lower()
             resource_cats = self._resolve_resource_category(target_lower)
-            category_match = bool(stated_categories.intersection(resource_cats))
-            if not category_match:
+            category_match = bool((stated_categories | set(allowed_categories or [])).intersection(resource_cats))
+            if resource_cats and stated_categories and allowed_categories is not None and not category_match:
                 unrelated_resources.append(target)
         total_meaningful_files = len(meaningful_accessed)
         mismatch_ratio = float(len(unrelated_resources) / total_meaningful_files) if total_meaningful_files > 0 else 0.0
-        if has_usb and total_meaningful_files > 0:
-            severity = "CRITICAL_EXFILTRATION"
+        confirmed = [e for e in telemetry_events if e.activity_details.get("confirmed_violation") is True
+                     and e.activity_details.get("confirmation_source")]
+        if confirmed:
+            severity = "CONFIRMED_VIOLATION"
             is_suspicious = True
         elif total_meaningful_files >= 2 and mismatch_ratio >= self.mismatch_threshold:
-            severity = "PROBING"
+            severity = "POTENTIAL_MISMATCH"
             is_suspicious = True
         else:
-            severity = "BENIGN"
+            severity = "NOT_COMPARABLE" if allowed_categories is None or not stated_categories or not file_events else "NO_MISMATCH_OBSERVED"
             is_suspicious = False
         explanations: List[str] = []
         if has_usb:
@@ -109,13 +116,13 @@ class SemanticTechnicalMismatchDetector:
             explanations.append(f"Declared communication domains: {', '.join(sorted(stated_categories))}")
         if unrelated_resources:
             explanations.append(
-                f"Out-of-role resource exploration: {len(unrelated_resources)}/{total_meaningful_files} "
+                f"Potential category mismatch requiring review: {len(unrelated_resources)}/{total_meaningful_files} "
                 f"(mismatch: {mismatch_ratio:.2f}, status: {severity})"
             )
         elif total_meaningful_files == 0:
-            explanations.append("Host telemetry is calm. Early psycholinguistic drift warning.")
+            explanations.append("No file events in the selected interval; source availability must be checked separately.")
         else:
-            explanations.append("All accessed files align with authorized communication context.")
+            explanations.append("File/USB co-occurrence does not establish unauthorized transfer or exfiltration.")
         return MismatchAnalysisResult(
             user_id=user_id,
             timestamp=current_time,
@@ -123,8 +130,10 @@ class SemanticTechnicalMismatchDetector:
             accessed_resources=meaningful_accessed,
             unrelated_resources=unrelated_resources,
             mismatch_ratio=mismatch_ratio,
-            has_usb_exfiltration=has_usb,
+            has_usb_exfiltration=any(e.activity_details.get("confirmed_usb_exfiltration") is True for e in confirmed),
             is_suspicious_mismatch=is_suspicious,
             threat_severity=severity,
-            explanation="; ".join(explanations)
+            explanation="; ".join(explanations),
+            evidence_ids=[e.event_id for e in telemetry_events],
+            source_status=source_status or {}
         )

@@ -8,6 +8,22 @@ from core.models import TelemetryEvent
 class TelemetryLogProcessor:
     DATETIME_FORMAT = "%m/%d/%Y %H:%M:%S"
 
+    def __init__(self):
+        self.source_status = {}
+        self.invalid_rows = {}
+
+    def _checked_rows(self, reader, filepath):
+        self.invalid_rows[filepath] = 0
+        if not {"id", "date", "user", "pc"}.issubset(reader.fieldnames or []):
+            self.source_status[filepath] = "incomplete"
+            return
+        for row in reader:
+            if not row.get("id") or not row.get("user") or not row.get("pc") or self.parse_timestamp(row.get("date")) is None:
+                self.source_status[filepath] = "incomplete"
+                self.invalid_rows[filepath] += 1
+                continue
+            yield row
+
     @classmethod
     def parse_timestamp(cls, raw_ts: Optional[str]) -> Optional[datetime]:
         if not raw_ts:
@@ -22,11 +38,12 @@ class TelemetryLogProcessor:
             return None
         
     def stream_logon_events(self, filepath: str) -> Iterator[TelemetryEvent]:
+        self.source_status[filepath] = "available" if os.path.exists(filepath) else "missing"
         if not os.path.exists(filepath):
             return
         with open(filepath, mode="r", encoding="utf-8", errors="replace") as f:
             reader = csv.DictReader(f)
-            for row in reader:
+            for row in self._checked_rows(reader, filepath):
                 ts = self.parse_timestamp(row.get("date"))
                 user = (row.get("user") or "").strip().lower()
                 if not ts or not user:
@@ -44,11 +61,12 @@ class TelemetryLogProcessor:
                 )
 
     def stream_device_events(self, filepath: str) -> Iterator[TelemetryEvent]:
+        self.source_status[filepath] = "available" if os.path.exists(filepath) else "missing"
         if not os.path.exists(filepath):
             return
         with open(filepath, mode="r", encoding="utf-8", errors="replace") as f:
             reader = csv.DictReader(f)
-            for row in reader:
+            for row in self._checked_rows(reader, filepath):
                 ts = self.parse_timestamp(row.get("date"))
                 user = (row.get("user") or "").strip().lower()
                 if not ts or not user:
@@ -66,11 +84,12 @@ class TelemetryLogProcessor:
                 )
 
     def stream_file_events(self, filepath: str) -> Iterator[TelemetryEvent]:
+        self.source_status[filepath] = "available" if os.path.exists(filepath) else "missing"
         if not os.path.exists(filepath):
             return
         with open(filepath, mode="r", encoding="utf-8", errors="replace") as f:
             reader = csv.DictReader(f)
-            for row in reader:
+            for row in self._checked_rows(reader, filepath):
                 ts = self.parse_timestamp(row.get("date"))
                 user = (row.get("user") or "").strip().lower()
                 if not ts or not user:
@@ -80,22 +99,28 @@ class TelemetryLogProcessor:
                     event_id=(row.get("id") or "").strip(),
                     user_id=user,
                     timestamp=ts,
-                    event_type="file_transfer",
+                    event_type="file_activity",
                     pc_id=(row.get("pc") or "").strip(),
                     target_resource=filename,
                     activity_details={
                         "filename": filename,
+                        "source": "file.csv",
+                        "original_category": "file",
+                        "activity": row.get("activity") or "unspecified_in_release",
+                        "release_semantics": "copy_to_removable_media",
+                        "semantics_source": "CERT r4.2/readme.txt; not proof of unauthorized exfiltration",
                         "file_depth": filename.count("\\") + filename.count("/"),
                         "has_content": bool(row.get("content"))
                     }
                 )
 
     def stream_http_events(self, filepath: str) -> Iterator[TelemetryEvent]:
+        self.source_status[filepath] = "available" if os.path.exists(filepath) else "missing"
         if not os.path.exists(filepath):
             return
         with open(filepath, mode="r", encoding="utf-8", errors="replace") as f:
             reader = csv.DictReader(f)
-            for row in reader:
+            for row in self._checked_rows(reader, filepath):
                 ts = self.parse_timestamp(row.get("date"))
                 user = (row.get("user") or "").strip().lower()
                 if not ts or not user:
