@@ -1,6 +1,4 @@
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Optional, Tuple
 import numpy as np
 
 
@@ -17,61 +15,42 @@ class EvaluationMetricsResult:
 
 class BenchmarkEvaluator:
     @staticmethod
-    def calculate_contamination_rate(
-        total_drift_windows: int,
-        admitted_poisoned_windows: int
-    ) -> float:
+    def calculate_contamination_rate(total_drift_windows, admitted_poisoned_windows):
         if total_drift_windows <= 0:
-            return 0.0
-        return float((admitted_poisoned_windows / total_drift_windows) * 100.0)
+            return float("nan")
+        return 100.0 * admitted_poisoned_windows / total_drift_windows
 
     @staticmethod
-    def calculate_alarm_lead_time(
-        first_alert_time: Optional[datetime],
-        first_technical_action_time: Optional[datetime]
-    ) -> float:
-        if not first_alert_time or not first_technical_action_time:
-            return 0.0
-        delta_seconds = (first_technical_action_time - first_alert_time).total_seconds()
-        return float(delta_seconds / 86400.0)
+    def calculate_alarm_lead_time(first_alert_time, first_technical_action_time):
+        if first_alert_time is None or first_technical_action_time is None:
+            return float("nan")
+        return (first_technical_action_time - first_alert_time).total_seconds() / 86400
 
     @staticmethod
-    def calculate_false_alarms_per_1000_days(
-        y_true: np.ndarray,
-        y_scores: np.ndarray,
-        threshold: float,
-        total_days: float
-    ) -> float:
+    def calculate_false_alarms_per_1000_days(y_true, y_scores, threshold, total_days):
         if total_days <= 0:
-            return 0.0
-        predicted_positives = (y_scores >= threshold)
-        false_alarms = np.sum((predicted_positives == 1) & (y_true == 0))
-        return float((false_alarms / total_days) * 1000.0)
+            return float("nan")
+        predicted = np.asarray(y_scores) >= threshold
+        onsets = predicted & ~np.r_[False, predicted[:-1]]
+        return float(np.sum(onsets & (np.asarray(y_true) == 0)) * 1000 / total_days)
 
     @staticmethod
-    def compute_pr_auc_and_recall_at_fpr(
-        y_true: np.ndarray,
-        y_scores: np.ndarray,
-        target_fpr: float = 0.01
-    ) -> Tuple[float, float]:
-        if len(y_true) == 0 or np.sum(y_true) == 0:
-            return 0.0, 0.0
-        desc_indices = np.argsort(y_scores)[::-1]
-        y_true_sorted = y_true[desc_indices]
-        n_pos = int(np.sum(y_true_sorted))
-        n_neg = len(y_true_sorted) - n_pos
-        if n_neg == 0:
-            return 1.0, 1.0
-        tps = np.cumsum(y_true_sorted)
-        fps = np.cumsum(1 - y_true_sorted)
-        recalls = tps / n_pos
-        precisions = tps / (tps + fps)
-        fprs = fps / n_neg
-        recall_prev = np.insert(recalls[:-1], 0, 0.0)
-        pr_auc = float(np.sum((recalls - recall_prev) * precisions))
-        valid_fpr_indices = np.where(fprs <= target_fpr)[0]
-        if len(valid_fpr_indices) > 0:
-            recall_at_fpr = float(recalls[valid_fpr_indices[-1]])
-        else:
-            recall_at_fpr = 0.0
-        return max(0.0, min(1.0, pr_auc)), max(0.0, min(1.0, recall_at_fpr))
+    def compute_pr_auc_and_recall_at_fpr(y_true, y_scores, target_fpr=0.01):
+        labels, scores = np.asarray(y_true), np.asarray(y_scores, dtype=float)
+        if labels.shape != scores.shape or labels.ndim != 1 or not 0 <= target_fpr <= 1:
+            raise ValueError("Invalid metric inputs")
+        valid = np.isin(labels, [0, 1]) & np.isfinite(scores)
+        labels, scores = labels[valid], scores[valid]
+        positives, negatives = np.sum(labels == 1), np.sum(labels == 0)
+        if not positives:
+            return float("nan"), float("nan")
+        order = np.argsort(-scores, kind="stable")
+        labels, scores = labels[order], scores[order]
+        boundaries = np.r_[np.flatnonzero(np.diff(scores)), len(scores) - 1]
+        tp = np.cumsum(labels)[boundaries]
+        fp = np.cumsum(1 - labels)[boundaries]
+        recall = tp / positives
+        precision = tp / (tp + fp)
+        area = float(np.sum(np.diff(np.r_[0.0, recall]) * precision))
+        recall_at_fpr = float(np.max(np.r_[0.0, recall[fp / negatives <= target_fpr]])) if negatives else float("nan")
+        return area, recall_at_fpr

@@ -92,6 +92,7 @@ class EmailMessageParser:
         if len(cleaned) < self.min_body_length:
             return None
         return CommunicationMessage(
+            message_id=(row.get("id") or "").strip(),
             sender_id=sender,
             sender_user_id=user_login if user_login else None,
             receiver_ids=all_receivers,

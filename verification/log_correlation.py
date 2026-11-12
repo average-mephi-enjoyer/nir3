@@ -30,9 +30,6 @@ class TargetedRetrospectiveVerifier:
         user_key = event.user_id.strip().lower()
         store = self.telemetry_store[user_key]
         store.append(event)
-        cutoff = event.timestamp - self.max_history
-        while store and store[0].timestamp < cutoff:
-            store.popleft()
 
     def register_communication_message(self, message: CommunicationMessage, user_id: Optional[str] = None) -> None:
         sender_email = message.sender_id.strip().lower()
@@ -40,9 +37,6 @@ class TargetedRetrospectiveVerifier:
         for key in {sender_email, resolved_uid}:
             store = self.message_store[key]
             store.append(message)
-            cutoff = message.timestamp - self.max_history
-            while store and store[0].timestamp < cutoff:
-                store.popleft()
 
     def verify_alert_signal(self, signal: RiskSignal) -> MismatchAnalysisResult:
         user_id = signal.employee_id.strip().lower()

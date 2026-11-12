@@ -1,35 +1,40 @@
 from collections import defaultdict, deque
-from datetime import datetime, timedelta
-from typing import Dict, Tuple
+from datetime import timedelta
 import numpy as np
 
 
 class TeamWorkloadContextTracker:
-    def __init__(self, window_days: int = 7, baseline_window_days: int = 30):
+    def __init__(self, window_days=7, baseline_window_days=30):
+        if not 0 < window_days < baseline_window_days:
+            raise ValueError("Invalid workload windows")
         self.window = timedelta(days=window_days)
         self.baseline_window = timedelta(days=baseline_window_days)
-        self.role_events: Dict[str, deque[Tuple[datetime, float]]] = defaultdict(deque)
+        self.role_events = defaultdict(deque)
+        self.last_timestamp = None
 
-    def register_role_activity(self, role: str, timestamp: datetime, intensity: float = 1.0) -> None:
-        event_queue = self.role_events[role]
-        event_queue.append((timestamp, intensity))
+    def register_role_activity(self, role, timestamp, intensity=1.0, employee_id=None):
+        if self.last_timestamp is not None and timestamp < self.last_timestamp:
+            raise ValueError("Workload events must be chronological")
+        self.last_timestamp = timestamp
+        if not employee_id:
+            return
+        self.role_events[role].append((timestamp, float(intensity), employee_id.lower()))
         cutoff = timestamp - self.baseline_window
-        while event_queue and event_queue[0][0] < cutoff:
-            event_queue.popleft()
+        for events in self.role_events.values():
+            while events and events[0][0] < cutoff:
+                events.popleft()
 
-    def get_role_workload_factor(self, role: str, current_time: datetime) -> float:
-        event_queue = self.role_events.get(role)
-        if not event_queue or len(event_queue) < 10:
+    def get_role_workload_factor(self, role, current_time, exclude_user=None):
+        cutoff = current_time - self.baseline_window
+        recent = current_time - self.window
+        events = [(ts, value, user) for ts, value, user in self.role_events.get(role, [])
+                  if cutoff <= ts < current_time and user != (exclude_user or "").lower()]
+        if len({user for _, _, user in events}) < 2:
             return 0.0
-        recent_cutoff = current_time - self.window
-        recent_sum = sum(val for ts, val in event_queue if ts >= recent_cutoff)
-        past_sum = sum(val for ts, val in event_queue if ts < recent_cutoff)
-        recent_days = max(self.window.total_seconds() / 86400.0, 1.0)
-        baseline_days = max((self.baseline_window - self.window).total_seconds() / 86400.0, 1.0)
-        recent_rate = recent_sum / recent_days
-        past_rate = past_sum / baseline_days
-        if past_rate <= 1e-4:
+        recent_sum = sum(value for ts, value, _ in events if ts >= recent)
+        past_sum = sum(value for ts, value, _ in events if ts < recent)
+        past_rate = past_sum / (self.baseline_window - self.window).days
+        if past_rate <= 0:
             return 0.0
-        relative_surge = (recent_rate - past_rate) / past_rate
-        workload_factor = float(np.clip(relative_surge / 2.0, 0.0, 1.0))
-        return workload_factor
+        surge = (recent_sum / self.window.days - past_rate) / past_rate
+        return float(np.clip(surge / 2, 0, 1))

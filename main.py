@@ -1,278 +1,221 @@
 import argparse
 import csv
-from datetime import datetime, timezone
-import math
-import os
-from typing import Dict, List, Optional
+from dataclasses import asdict
+from datetime import timedelta
+from pathlib import Path
 import numpy as np
-from benchmark.drift_generator import DriftInjector
-from benchmark.baseline_comparison import BaselineBenchmarkRunner
-from benchmark.drift_generator import DriftInjector
-from benchmark.metrics import BenchmarkEvaluator
+from benchmark.baseline_comparison import BaselineBenchmarkRunner, FeatureObservation
 from benchmark.visualizer import BenchmarkVisualizer
-from core.models import CommunicationMessage, MarkerVector, RiskSignal, TelemetryEvent
+from core.models import MarkerVector, RiskSignal
 from extractors.graph_topology import DynamicCommunicationGraph
 from extractors.llm_semantic import LLMSemanticExtractor
 from extractors.spacy_statistical import SpacyStatisticalExtractor
+from parsers.cert_ground_truth import load_cert_ground_truth, export_ground_truth
+from parsers.role_directory import RoleDirectory
 from parsers.cert_telemetry_parser import TelemetryLogProcessor
 from parsers.email_parser import EmailMessageParser
 from profiling.profile import ContaminationResistantProfile
-from profiling.sequential_decision import SequentialDecisionManager
 from profiling.sliding_window import SlidingTimeWindow
 from profiling.workload_filter import TeamWorkloadContextTracker
 from verification.log_correlation import TargetedRetrospectiveVerifier
 
 
-def load_cert_ground_truth(answers_filepath: str) -> Dict[str, Dict[str, datetime]]:
-    ground_truth: Dict[str, Dict[str, datetime]] = {}
-    if not os.path.exists(answers_filepath):
-        return ground_truth
-    dt_format = "%m/%d/%Y %H:%M:%S"
-    with open(answers_filepath, mode="r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            user = (row.get("user") or "").strip().lower()
-            start_str = (row.get("start") or "").strip()
-            end_str = (row.get("end") or "").strip()
-            if not user or not start_str:
-                continue
-            try:
-                t_start = datetime.strptime(start_str, dt_format).replace(tzinfo=timezone.utc)
-                t_end = datetime.strptime(end_str, dt_format).replace(tzinfo=timezone.utc) if end_str else None
-                ground_truth[user] = {"start": t_start, "end": t_end}
-            except Exception:
-                continue
-    return ground_truth
+CERT_USERS = ("aam0658", "ajr0932", "btl0226", "cah0936", "aaf0535", "abc0174", "ccl0068", "bbs0039", "csc0217")
 
 
-def run_cert_dataset_evaluation(
-    archive_dir: str = "archive",
-    target_user: str = "aam0658",
-    use_mock_llm: bool = True
-) -> None:
-    email_path = os.path.join(archive_dir, "r4.2", "email.csv")
-    file_path = os.path.join(archive_dir, "r4.2", "file.csv")
-    device_path = os.path.join(archive_dir, "r4.2", "device.csv")
-    answers_path = os.path.join(archive_dir, "answers", "insiders.csv")
-    target_norm = target_user.strip().lower()
-    print(f"[*] Initializing CERT r4.2 evaluation pipeline for employee '{target_norm}'...")
-    gt = load_cert_ground_truth(answers_path)
-    target_gt = gt.get(target_norm)
-    t_drift_start = target_gt["start"] if target_gt else None
-    t_first_action = target_gt["end"] if target_gt else None
-    email_parser = EmailMessageParser()
-    telem_parser = TelemetryLogProcessor()    
-    protected_profile = ContaminationResistantProfile(alpha_ema=0.05, quarantine_delay_days=14)
-    decision_manager = SequentialDecisionManager(alpha_fpr=0.01, k=3, n=5, use_conformal=True)
-    verifier = TargetedRetrospectiveVerifier(retro_window_days=7, mismatch_threshold=0.5)
-    workload_tracker = TeamWorkloadContextTracker()
-    sliding_window = SlidingTimeWindow(employee_id=target_norm, role="general")
-    comm_graph = DynamicCommunicationGraph(decay_window_days=30)
-    statistical_extractor = SpacyStatisticalExtractor()
-    llm_extractor = LLMSemanticExtractor(force_offline_mode=use_mock_llm)
-    comm_graph.register_alias(target_norm, f"{target_norm}@")
-    ema_unshielded_means: Dict[str, float] = {m: 0.0 for m in ContaminationResistantProfile.TRACKED_MARKERS}
-    ema_unshielded_vars: Dict[str, float] = {m: 1.0 for m in ContaminationResistantProfile.TRACKED_MARKERS}
-    alpha_std = 0.05
-    static_means: Dict[str, float] = {}
-    static_vars: Dict[str, float] = {}
-    print("[*] Ingesting telemetry logs (device.csv, file.csv)...")
-    if os.path.exists(device_path):
-        for event in telem_parser.stream_device_events(device_path):
-            if event.user_id == target_norm:
+def collect_cert_features(archive_dir, target_user, truth, use_mock_llm=True):
+    archive = Path(archive_dir)
+    directory = RoleDirectory(archive / "r4.2" / "LDAP")
+    parser = EmailMessageParser()
+    statistical = SpacyStatisticalExtractor()
+    semantic = LLMSemanticExtractor(force_offline_mode=use_mock_llm)
+    workload = TeamWorkloadContextTracker()
+    graphs = {}
+    windows, references, observations, reference_vectors = {}, set(), [], {}
+    verifier = TargetedRetrospectiveVerifier()
+    start, train_end, calibration_end, test_start, previous = None, None, None, None, None
+    initial_role = None
+    try:
+        for message in parser.stream_cert_emails(str(archive / "r4.2" / "email.csv")):
+            timestamp = message.timestamp
+            if previous is not None and timestamp < previous:
+                raise ValueError("email.csv must be chronologically ordered")
+            previous = timestamp
+            if start is None:
+                start = timestamp
+                train_end = start + timedelta(days=30)
+                calibration_end = train_end + timedelta(days=30)
+                test_start = calibration_end + timedelta(days=14)
+                roster = directory.at(start)
+                if target_user not in roster:
+                    raise ValueError(f"Unknown employee: {target_user}")
+                initial_role = roster[target_user]["role"]
+                held_out = set(sorted(user for user in roster if user not in truth)[-5:])
+                eligible = sorted(user for user, info in roster.items() if info["role"] == initial_role
+                                  and user not in truth and user != target_user and user not in held_out)
+                references = set(eligible[:5])
+                if len(references) < 2:
+                    raise ValueError(f"Insufficient independent reference employees for role {initial_role}")
+                for user in references | {target_user}:
+                    windows[user] = SlidingTimeWindow(user, roster[user]["role"], roster[user]["email"])
+                    graphs[user] = DynamicCommunicationGraph()
+                    for peer, info in roster.items():
+                        graphs[user].register_alias(peer, info["email"])
+            sender = (message.sender_user_id or "").lower()
+            sender_info = directory.user(sender, timestamp)
+            role = sender_info.get("role", "unknown")
+            workload.register_role_activity(role, timestamp, employee_id=sender)
+            recipients = {recipient.lower() for recipient in message.receiver_ids}
+            involved = []
+            for user, window in windows.items():
+                if user in references and timestamp >= train_end:
+                    continue
+                info = directory.user(user, timestamp)
+                window.role = info.get("role", "unknown")
+                window.email = info.get("email", window.email).lower()
+                if sender == user or window.email in recipients:
+                    window.add_message(message)
+                    involved.append(user)
+            if not involved:
+                continue
+            for user in involved:
+                graphs[user].add_communication(message)
+            if target_user in involved:
+                verifier.register_communication_message(message, user_id=target_user)
+            if sender not in involved:
+                continue
+            window = windows[sender]
+            context = graphs[sender].update_context(window.export_context())
+            stat_vector = statistical.compute_markers(message, context)
+            semantic_vector = semantic.compute_markers(message, context)
+            values = {marker: getattr(semantic_vector if marker.startswith("llm_") else stat_vector, marker)
+                      for marker in MarkerVector.feature_names()}
+            vector = MarkerVector(**values, llm_uncertainty=semantic_vector.llm_uncertainty)
+            if sender in references:
+                reference_vectors.setdefault(window.role, []).append(vector)
+            else:
+                incident = truth.get(target_user)
+                label = incident.label(message) if incident else 0
+                factor = workload.get_role_workload_factor(window.role, timestamp, exclude_user=target_user)
+                observations.append(FeatureObservation(timestamp, vector, label, factor, message.message_id or ""))
+    finally:
+        semantic.close()
+    if start is None:
+        raise ValueError("No usable emails")
+    incident = truth.get(target_user)
+    if incident and incident.start < test_start:
+        raise ValueError("Incident overlaps the fixed training/calibration period")
+    training = [o for o in observations if o.timestamp < train_end]
+    calibration = [o for o in observations if train_end <= o.timestamp < test_start]
+    testing = [o for o in observations if o.timestamp >= test_start]
+    peers = reference_vectors.get(initial_role, [])
+    if len(peers) < 2:
+        raise ValueError("Insufficient independent role observations")
+    matrix = np.asarray([vector.to_numpy() for vector in peers])
+    role_priors = {marker: {"mean": float(matrix[:, i].mean()),
+                           "variance": float(max(matrix[:, i].var(ddof=1), 1e-4))}
+                   for i, marker in enumerate(MarkerVector.feature_names())}
+    metadata = {"training_end": str(train_end), "calibration_end": str(calibration_end),
+                "test_start": str(test_start), "reference_users": ",".join(sorted(references)),
+                "role": initial_role, "training_observations": len(training),
+                "calibration_observations": len(calibration), "test_observations": len(testing),
+                "semantic_mode": "lexical_fallback" if use_mock_llm else "local_llm_requested_with_fallback",
+                "response_marker": "unavailable_without_reply_link"}
+    return training, calibration, testing, role_priors, verifier, graphs[target_user], metadata
+
+
+def write_event_log(path, observations, traces):
+    with path.open("w", encoding="utf-8", newline="") as destination:
+        writer = csv.writer(destination)
+        writer.writerow(["method", "message_id", "timestamp", "label", "risk", "alert", "sequential_score", "baseline"])
+        for method, trace in traces.items():
+            alerts = {id(observation) for observation in trace.alerts}
+            for i, observation in enumerate(observations):
+                writer.writerow([method, observation.observation_id, observation.timestamp, observation.label,
+                                 trace.scores[i], id(observation) in alerts, trace.sequential_scores[i], trace.baselines[i]])
+    with path.with_name("admissions.csv").open("w", encoding="utf-8", newline="") as destination:
+        writer = csv.writer(destination)
+        writer.writerow(["method", "message_id", "timestamp", "reason", "risk", "horizon_risk"])
+        for method, trace in traces.items():
+            decisions = trace.profile.quarantine.decisions if method in ("Protected", "EMA quarantine") else trace.admissions
+            for observation in decisions:
+                writer.writerow([method, observation.observation_id, observation.timestamp, getattr(observation, "reason", "updated"),
+                                 getattr(observation, "risk_score", ""), getattr(observation, "horizon_risk", "")])
+
+
+def run_cert_dataset_evaluation(archive_dir="archive", target_user="aam0658", use_mock_llm=True,
+                                output_dir="output", use_conformal=False):
+    target_user = target_user.lower()
+    output = Path(output_dir) / target_user
+    output.mkdir(parents=True, exist_ok=True)
+    truth = load_cert_ground_truth(Path(archive_dir) / "answers" / "insiders.csv")
+    export_ground_truth(truth, CERT_USERS, Path(output_dir) / "cert_ground_truth.csv")
+    training, calibration, testing, priors, verifier, graph, metadata = collect_cert_features(archive_dir, target_user, truth, use_mock_llm)
+    incident = truth.get(target_user)
+    rows, traces = BaselineBenchmarkRunner.evaluate_stream(training, calibration, testing, priors,
+                    incident.start if incident else None, incident.first_action if incident else None,
+                    incident.end if incident else None, use_conformal=use_conformal)
+    table = BaselineBenchmarkRunner.format_markdown_table(rows)
+    (output / "baseline_comparison.md").write_text(table, encoding="utf-8")
+    write_event_log(output / "events.csv", testing, traces)
+    with (output / "metrics.csv").open("w", encoding="utf-8", newline="") as destination:
+        writer = csv.DictWriter(destination, fieldnames=list(asdict(rows[0])))
+        writer.writeheader()
+        writer.writerows(asdict(row) for row in rows)
+    telemetry = TelemetryLogProcessor()
+    for filename, stream in (("device.csv", telemetry.stream_device_events), ("file.csv", telemetry.stream_file_events)):
+        for event in stream(str(Path(archive_dir) / "r4.2" / filename)):
+            if event.user_id == target_user:
                 verifier.register_telemetry_event(event)
-    if os.path.exists(file_path):
-        for event in telem_parser.stream_file_events(file_path):
-            if event.user_id == target_norm:
-                verifier.register_telemetry_event(event)
-    print("[*] Streaming email.csv and executing parallel 3-way benchmark...")
-    time_steps: List[int] = []
-    marker_histories: Dict[str, List[float]] = {m: [] for m in ContaminationResistantProfile.TRACKED_MARKERS}
-    baseline_histories: Dict[str, List[float]] = {m: [] for m in ContaminationResistantProfile.TRACKED_MARKERS}
-    risk_scores_proposed: List[float] = []
-    risk_scores_ema: List[float] = []
-    risk_scores_static: List[float] = []
-    y_true_all: List[int] = []
-    first_alert_time_proposed: Optional[datetime] = None
-    first_alert_time_ema: Optional[datetime] = None
-    total_drift_windows = 0
-    poisoned_windows_ema = 0
-    step = 0
-    audit_res = None
-    if os.path.exists(email_path):
-        for msg in email_parser.stream_cert_emails(email_path):
-            sender_uid = (msg.sender_user_id or "").lower()
-            sender_email = msg.sender_id.lower()
-            receivers = [r.lower() for r in msg.receiver_ids]
-            is_target_sender = (sender_uid == target_norm or target_norm in sender_email)
-            is_target_receiver = any(target_norm in r for r in receivers)
-            if not is_target_sender and not is_target_receiver:
-                continue
-            verifier.register_communication_message(msg, user_id=target_norm)
-            workload_tracker.register_role_activity(role="general", timestamp=msg.timestamp)
-            sliding_window.add_message(msg)
-            comm_graph.add_communication(msg)
-            if not is_target_sender:
-                continue
-            context = sliding_window.export_context()
-            context = comm_graph.update_context(context)
-            stat_vector = statistical_extractor.compute_markers(msg, context=context)
-            llm_vector = llm_extractor.compute_markers(msg, context=context)
-            vector_prop = MarkerVector(
-                pronoun_marker=stat_vector.pronoun_marker,
-                syntactic_marker=stat_vector.syntactic_marker,
-                activity_marker=stat_vector.activity_marker,
-                response_marker=stat_vector.response_marker,
-                social_marker=stat_vector.social_marker,
-                llm_alienation=llm_vector.llm_alienation,
-                llm_concealment=llm_vector.llm_concealment,
-                llm_rationalization=llm_vector.llm_rationalization,
-                llm_access_focus=llm_vector.llm_access_focus,
-                llm_conflict=llm_vector.llm_conflict,
-                llm_uncertainty=llm_vector.llm_uncertainty
-            )
-            vector_ema_dict = ContaminationResistantProfile.marker_vector_to_dict(vector_prop)
-            for k in ["llm_alienation", "llm_concealment", "llm_rationalization", "llm_access_focus", "llm_conflict"]:
-                vector_ema_dict[k] = 0.0
-            is_malicious = bool(t_drift_start and msg.timestamp >= t_drift_start)
-            if is_malicious:
-                total_drift_windows += 1
-                poisoned_windows_ema += 1
-            y_true_all.append(1 if is_malicious else 0)
-            workload_factor = workload_tracker.get_role_workload_factor("general", msg.timestamp)
-            z_scores, r_prop, is_alert_raw = protected_profile.register_observation(
-                markers=vector_prop,
-                timestamp=msg.timestamp,
-                team_workload_factor=workload_factor
-            )
-            is_confirmed_alert, rationale = decision_manager.process_observation(
-                risk_score=r_prop,
-                is_instant_alert=is_alert_raw,
-                is_clean_mature=(len(protected_profile.quarantine) >= 14 and not is_alert_raw)
-            )
-            if is_confirmed_alert and first_alert_time_proposed is None:
-                first_alert_time_proposed = msg.timestamp
-                print(f"[!] PROPOSED ALERT TRIGGERED: {msg.timestamp} ({rationale})")
-                sig = RiskSignal(employee_id=target_norm, timestamp=msg.timestamp, raw_markers=vector_prop, normalized_deviations=z_scores)
-                audit_res = verifier.verify_alert_signal(sig)
-                print(f"    --> Stage 2 Audit: {audit_res.explanation}")
-                protected_profile.freeze_on_alert(msg.timestamp)
-                decision_manager.freeze()
-            sq_dev_ema = 0.0
-            sq_dev_ema = 0.0
-            for m in ContaminationResistantProfile.TRACKED_MARKERS:
-                val = vector_ema_dict[m]
-                m_mean = ema_unshielded_means[m]
-                m_std = math.sqrt(max(ema_unshielded_vars[m], 1e-4))
-                z_ema = max(-10.0, min(10.0, (val - m_mean) / m_std))
-                sq_dev_ema += z_ema ** 2
-                diff = val - m_mean
-                ema_unshielded_means[m] += alpha_std * diff
-                ema_unshielded_vars[m] = (1.0 - alpha_std) * ema_unshielded_vars[m] + alpha_std * (diff ** 2)
-            r_ema = math.sqrt(sq_dev_ema / len(ContaminationResistantProfile.TRACKED_MARKERS))
-            if r_ema >= 2.8 and first_alert_time_ema is None:
-                first_alert_time_ema = msg.timestamp
-            if step < 30:
-                for m in ContaminationResistantProfile.TRACKED_MARKERS:
-                    static_means[m] = static_means.get(m, 0.0) + vector_ema_dict[m] / 30.0
-                    static_vars[m] = 0.05
-            sq_dev_static = sum(
-                (max(-10.0, min(10.0, (vector_ema_dict[m] - static_means[m]) / math.sqrt(static_vars[m])))) ** 2
-                for m in ContaminationResistantProfile.TRACKED_MARKERS
-            )
-            r_static = math.sqrt(sq_dev_static / len(ContaminationResistantProfile.TRACKED_MARKERS))
-            time_steps.append(step)
-            step += 1
-            risk_scores_proposed.append(r_prop)
-            risk_scores_ema.append(r_ema)
-            risk_scores_static.append(r_static)
-            v_dict_prop = ContaminationResistantProfile.marker_vector_to_dict(vector_prop)
-            for m in ContaminationResistantProfile.TRACKED_MARKERS:
-                marker_histories[m].append(v_dict_prop[m])
-                baseline_histories[m].append(protected_profile.trusted_means.get(m, 0.0))
-    lead_proposed = BenchmarkEvaluator.calculate_alarm_lead_time(first_alert_time_proposed, t_first_action)
-    lead_ema = BenchmarkEvaluator.calculate_alarm_lead_time(first_alert_time_ema, t_first_action)
-    obs_days = float(len(time_steps))
-    comparison_rows = BaselineBenchmarkRunner.evaluate_all(
-        y_true=np.array(y_true_all),
-        risk_scores_proposed=np.array(risk_scores_proposed),
-        risk_scores_ema=np.array(risk_scores_ema),
-        risk_scores_static=np.array(risk_scores_static),
-        lead_time_proposed=lead_proposed,
-        lead_time_ema=lead_ema,
-        total_drift_windows=total_drift_windows,
-        poisoned_admitted_ema=poisoned_windows_ema,
-        observation_days=obs_days
-    )
-    markdown_table = BaselineBenchmarkRunner.format_markdown_table(comparison_rows)
-    print("\n")
-    print(markdown_table)
-    print("\n")
-    with open("output/baseline_comparison.md", "w", encoding="utf-8") as f:
-        f.write("# Сравнительный анализ эффективности методов мониторинга инсайдерского риска\n\n")
-        f.write(f"- **Тестируемый субъект CERT:** `{target_norm}`\n")
-        f.write(f"- **Количество сообщений:** `{step}`\n\n")
-        f.write(markdown_table)
-    report_md = f"""# Карточка расследования инцидента инсайдерского риска
-
-## 1. Сводка инцидента
-- **Идентификатор субъекта:** `{target_norm}`
-- **Временная метка обнаружения:** `{first_alert_time_proposed}`
-- **Упреждение до технической эксфильтрации ($T_{{lead}}$):** **{lead_proposed:.2f} суток**
-- **Уровень угрозы (Threat Severity):** `{audit_res.threat_severity if audit_res else 'PROBING'}`
-
-## 2. Результаты Этапа 1 (Последовательный психолингвистический скрининг)
-- **Метод принятия решений:** Конформный $e$-мартингал Вилле ($E_t \\ge 100, \\alpha = 0.01$).
-- **Драйверы аномалии:** Нарушение баланса социальной связности, семантические маркеры отчуждения и поиска внешних каналов.
-
-## 3. Результаты Этапа 2 (Техническая верификация)
-- **Вердикт аудитора:** {audit_res.explanation if audit_res else 'N/A'}
-- **Коэффициент рассогласования ($M_{{ratio}}$):** {audit_res.mismatch_ratio if audit_res else 0.0:.2f}
-
-## 4. Защитные меры системы
-- Базовый профиль субъекта заморожен в момент $t = {first_alert_time_proposed}$.
-- Подозрительные окна в карантине (14 дней) удалены, загрязнение эталонной нормы: **0.0%**.
-"""
-    with open("output/incident_report.md", "w", encoding="utf-8") as f:
-        f.write(report_md)
-    ego_subgraph = comm_graph.build_ego_graph(target_norm, radius=2)
-    BenchmarkVisualizer.plot_communication_graph(ego_subgraph, target_norm, "output/cert_ego_graph.png")
-    BenchmarkVisualizer.plot_all_markers_grid(time_steps, marker_histories, baseline_histories, "output/cert_all_markers.png")
-    BenchmarkVisualizer.plot_top_markers_dynamics(time_steps, marker_histories, baseline_histories, ["activity_marker", "social_marker", "pronoun_marker"], "output/cert_top_markers.png")
-    print("[+] All benchmark tables and visualizations exported to output/ directory.")
+    trace = traces["Protected"]
+    audit = []
+    for observation in trace.alerts:
+        signal = RiskSignal(target_user, observation.timestamp, observation.markers, {})
+        result = verifier.verify_alert_signal(signal)
+        audit.append(f"- {observation.timestamp}: {result.explanation}")
+    metadata_text = "\n".join(f"- {key}: {value}" for key, value in metadata.items())
+    report = (f"# CERT {target_user}\n\n{metadata_text}\n\n"
+              f"- Profile state: {trace.profile.state}\n"
+              "- Sequential control: empirical; no proven anytime FPR guarantee.\n"
+              "- First technical action: earliest annotated non-email observable, not necessarily exfiltration.\n"
+              "- Technical verdicts remain exploratory pending checklist items 16–17.\n\n"
+              + "\n".join(audit) + "\n\n" + table)
+    (output / "incident_report.md").write_text(report, encoding="utf-8")
+    histories = {marker: [getattr(o.markers, marker) for o in testing] for marker in MarkerVector.feature_names()}
+    baselines = {marker: [baseline[marker] for baseline in trace.baselines] for marker in MarkerVector.feature_names()}
+    steps = list(range(len(testing)))
+    BenchmarkVisualizer.plot_all_markers_grid(steps, histories, baselines, str(output / "cert_all_markers.png"))
+    BenchmarkVisualizer.plot_top_markers_dynamics(steps, histories, baselines,
+                                                 ["activity_marker", "social_marker", "pronoun_marker"],
+                                                 str(output / "cert_top_markers.png"))
+    BenchmarkVisualizer.plot_communication_graph(graph.build_ego_graph(target_user), target_user, str(output / "cert_ego_graph.png"))
+    print(table)
+    return rows, traces, testing
 
 
-def run_synthetic_benchmark(scenario_type: str = "ramp") -> None:
-    """
-    Fallback runner for controlled synthetic stress testing.
-    """
-    injector = DriftInjector(seed=42)
-    start_time = datetime(2026, 1, 1, 9, 0, 0, tzinfo=timezone.utc)
-    target_user = "employee_u17"
-    if scenario_type == "ramp":
-        scenario = injector.generate_ramp_drift_scenario(
-            user_id=target_user,
-            start_time=start_time,
-            duration_days=60,
-            l_ramp_days=30,
-            delta_max=3.5
-        )
-    else:
-        scenario = injector.generate_stress_control_scenario(
-            user_id=target_user,
-            start_time=start_time,
-            duration_days=40
-        )
-    print(f"[*] Synthetic scenario '{scenario.scenario_type}' initialized successfully.")
+def run_synthetic_benchmark(scenario_type="ramp"):
+    from run_stress_test import run_suite
+    return run_suite(scenario_type=scenario_type)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Insider Risk Early Detection Pipeline")
-    parser.add_argument("--dataset", action="store_true", help="Execute on real CERT r4.2 dataset files in archive/")
-    parser.add_argument("--user", type=str, default="aam0658", help="Target CERT employee ID (e.g. aam0658, aaf0535, abc0174)")
-    parser.add_argument("--scenario", type=str, default="ramp", choices=["ramp", "stress"], help="Synthetic scenario type if --dataset is not set")
+    parser.add_argument("--dataset", action="store_true")
+    parser.add_argument("--user", default="aam0658")
+    parser.add_argument("--all-users", action="store_true")
+    parser.add_argument("--archive", default="archive")
+    parser.add_argument("--output", default="output")
+    parser.add_argument("--conformal", action="store_true")
+    parser.add_argument("--scenario", default="ramp", choices=["ramp", "stress", "all"])
     args = parser.parse_args()
     if args.dataset:
-        run_cert_dataset_evaluation(archive_dir="archive", target_user=args.user, use_mock_llm=True)
+        users = list(CERT_USERS) if args.all_users else [args.user]
+        if args.all_users:
+            directory = RoleDirectory(Path(args.archive) / "r4.2" / "LDAP")
+            truth = load_cert_ground_truth(Path(args.archive) / "answers" / "insiders.csv")
+            eligible = sorted(user for user in directory.snapshots[0] if user not in truth)
+            users.extend(eligible[-5:])
+        for user in users:
+            run_cert_dataset_evaluation(args.archive, user, output_dir=args.output, use_conformal=args.conformal)
     else:
         run_synthetic_benchmark(args.scenario)

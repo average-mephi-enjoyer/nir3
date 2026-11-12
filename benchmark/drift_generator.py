@@ -20,7 +20,7 @@ class SyntheticScenario:
 
 class DriftInjector:
     def __init__(self, seed: int = 42):
-        np.random.seed(seed)
+        self.rng = np.random.default_rng(seed)
 
     def generate_acute_scenario(
         self,
@@ -179,3 +179,58 @@ class DriftInjector:
                 )
             )
         return scenario
+
+    def generate_feature_scenario(self, kind="ramp", duration_days=180, drift_days=60, intensity=3.0, seed=42):
+        from datetime import timezone
+        from benchmark.baseline_comparison import FeatureObservation
+        from profiling.workload_filter import TeamWorkloadContextTracker
+        if kind not in {"ramp", "step", "adaptive", "role_change", "stress", "burnout", "normal"}:
+            raise ValueError("Unknown feature scenario")
+        rng = np.random.default_rng(seed)
+        origin = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        training, calibration, testing = [], [], []
+        proxy = np.full(10, 0.3)
+        workload_tracker = TeamWorkloadContextTracker()
+        for day in range(134 + duration_days):
+            values = rng.normal(0.3, 0.05, 10)
+            index = day - 134
+            elapsed = index - 30
+            label, workload = 0, 0.0
+            if elapsed >= 0:
+                if kind == "ramp":
+                    values += 0.05 * intensity * min(1.0, (elapsed + 1) / drift_days)
+                    label = 1
+                elif kind == "step":
+                    values += 0.05 * intensity
+                    label = 1
+                elif kind == "adaptive":
+                    values = proxy + 0.05 * intensity / 4 + rng.normal(0, 0.01, 10)
+                    label = 1
+                elif kind == "role_change":
+                    values += 0.05 * intensity
+                elif kind in {"stress", "burnout"} and elapsed < drift_days:
+                    for marker in (1, 3, 5, 9):
+                        values[marker] += 0.05 * intensity
+            timestamp = origin + timedelta(days=day)
+            for peer in ("peer_a", "peer_b"):
+                intensity_peer = 5.0 if kind == "stress" and 0 <= elapsed < drift_days else 1.0
+                workload_tracker.register_role_activity("general", timestamp, intensity_peer, peer)
+            target_role = "new_role" if kind == "role_change" and elapsed >= 0 else "general"
+            workload_tracker.register_role_activity(target_role, timestamp, 5.0 if kind == "burnout" and elapsed >= 0 else 1.0, "target")
+            workload = workload_tracker.get_role_workload_factor(target_role, timestamp, exclude_user="target")
+            proxy += 0.05 * (values - proxy)
+            vector = MarkerVector(**dict(zip(MarkerVector.feature_names(), values)))
+            observation = FeatureObservation(origin + timedelta(days=day), vector, label, workload, f"{kind}-{seed}-{day}")
+            if day < 60:
+                training.append(observation)
+            elif day < 134:
+                calibration.append(observation)
+            elif day >= 134:
+                testing.append(observation)
+        malicious = kind in {"ramp", "step", "adaptive"}
+        start = origin + timedelta(days=164) if malicious else None
+        action = start + timedelta(days=drift_days) if malicious else None
+        reference = rng.normal(0.3, 0.05, (120, 10))
+        priors = {marker: {"mean": float(reference[:, i].mean()), "variance": float(reference[:, i].var(ddof=1))}
+                  for i, marker in enumerate(MarkerVector.feature_names())}
+        return training, calibration, testing, priors, start, action

@@ -14,12 +14,15 @@ class DynamicCommunicationGraph:
         self.edge_stream: Deque[Tuple[datetime, str, str, bool]] = deque()
         self.adjacency_counts: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
         self.user_aliases: Dict[str, Set[str]] = defaultdict(set)
+        self.canonical_users: Dict[str, str] = {}
+        self.last_timestamp = None
 
     def register_alias(self, user_id: str, email: str) -> None:
         u = user_id.lower().strip()
         e = email.lower().strip()
         self.user_aliases[u].add(e)
         self.user_aliases[e].add(u)
+        self.canonical_users[e] = u
 
     def _is_external_address(self, email: str) -> bool:
         if "@" not in email:
@@ -28,12 +31,17 @@ class DynamicCommunicationGraph:
         return domain not in self.CORPORATE_DOMAINS
     def add_communication(self, message: CommunicationMessage) -> None:
         sender = (message.sender_user_id or message.sender_id).lower().strip()
+        sender = self.canonical_users.get(sender, sender)
         ts = message.timestamp
+        if self.last_timestamp is not None and ts < self.last_timestamp:
+            raise ValueError("Graph events must be chronological")
+        self.last_timestamp = ts
         for recipient in message.receiver_ids:
             target = recipient.lower().strip()
             if sender == target:
                 continue
             is_external = self._is_external_address(target)
+            target = self.canonical_users.get(target, target)
             self.edge_stream.append((ts, sender, target, is_external))
             self.adjacency_counts[sender][target] += 1
         self._evict_expired(ts)
@@ -56,7 +64,7 @@ class DynamicCommunicationGraph:
         for node in list(self.adjacency_counts.keys()):
             if norm in node:
                 candidates.add(node)
-        return [c for c in candidates if c in self.adjacency_counts or any(c in tgts for tgts in self.adjacency_counts.values())]
+        return [c for c in sorted(candidates, key=lambda c: (c != norm, c)) if c in self.adjacency_counts or any(c in tgts for tgts in self.adjacency_counts.values())]
 
     def build_ego_graph(self, employee_id: str, radius: int = 2) -> nx.DiGraph:
         g = nx.DiGraph()
@@ -102,7 +110,7 @@ class DynamicCommunicationGraph:
         outgoing = set(ego_g.successors(root_node))
         incoming = set(ego_g.predecessors(root_node))
         reciprocity = float((len(outgoing.intersection(incoming)) + 1.0) / (len(outgoing) + 2.0))
-        betweenness_dict = nx.betweenness_centrality(ego_g, normalized=True, weight="weight")
+        betweenness_dict = nx.betweenness_centrality(ego_g, normalized=True, weight=None)
         betweenness = float(betweenness_dict.get(root_node, 0.0))
         return in_degree, out_degree, reciprocity, betweenness, external_ratio
 
@@ -112,5 +120,5 @@ class DynamicCommunicationGraph:
         context.outdegree = out_deg
         context.reciprocity = recip
         context.betweenness = betw
-        context.betweenness = ext_ratio
+        context.external_ratio = ext_ratio
         return context

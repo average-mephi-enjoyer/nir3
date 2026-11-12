@@ -10,6 +10,7 @@ class CommunicationMessage:
     receiver_ids: List[str]
     timestamp: datetime
     sender_user_id: Optional[str] = None
+    message_id: Optional[str] = None
     channel: str = "email"
     subject: Optional[str] = None
     body: Optional[str] = None
@@ -32,6 +33,7 @@ class EmployeeContext:
     outdegree: float = 0.0
     reciprocity: float = 0.0
     betweenness: float = 0.0
+    external_ratio: float = 0.0
     mean_reply_time: float = 0.0
     median_reply_time: float = 0.0
     reply_time_std: float = 0.0

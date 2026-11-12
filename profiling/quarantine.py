@@ -1,68 +1,65 @@
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime, timedelta
-from typing import Dict, List, Tuple
-
+from datetime import timedelta
 from core.models import MarkerVector
 
 
 @dataclass(slots=True)
 class QuarantineObservation:
-    timestamp: datetime
+    timestamp: object
     raw_markers: MarkerVector
-    marker_dict: Dict[str, float]
+    marker_dict: dict
     risk_score: float = 0.0
+    horizon_risk: float = 0.0
+    reason: str = "pending"
+    observation_id: str = ""
 
 
 class QuarantineBuffer:
-    def __init__(
-        self,
-        quarantine_delay_days: int = 14,
-        h_quarantine: float = 2.0
-    ):
+    def __init__(self, quarantine_delay_days=14, h_quarantine=2.0):
+        if quarantine_delay_days < 0 or h_quarantine <= 0:
+            raise ValueError("Invalid quarantine parameters")
         self.delay = timedelta(days=quarantine_delay_days)
         self.h_quarantine = h_quarantine
-        self.buffer: deque[QuarantineObservation] = deque()
+        self.buffer = deque()
+        self.decisions = []
+        self.last_timestamp = None
 
-    def enqueue(
-        self,
-        timestamp: datetime,
-        markers: MarkerVector,
-        marker_dict: Dict[str, float],
-        risk_score: float = 0.0
-    ) -> None:
-        obs = QuarantineObservation(
-            timestamp=timestamp,
-            raw_markers=markers,
-            marker_dict=marker_dict,
-            risk_score=risk_score
-        )
-        self.buffer.append(obs)
+    def enqueue(self, timestamp, markers, marker_dict, risk_score=0.0, observation_id=""):
+        if self.last_timestamp is not None and timestamp < self.last_timestamp:
+            raise ValueError("Observations must be chronological")
+        self.last_timestamp = timestamp
+        normalized = risk_score / self.h_quarantine
+        for candidate in self.buffer:
+            if timestamp <= candidate.timestamp + self.delay:
+                candidate.horizon_risk = max(candidate.horizon_risk, normalized)
+        self.buffer.append(QuarantineObservation(timestamp, markers, dict(marker_dict), risk_score, normalized,
+                                                 observation_id=observation_id))
 
-    def extract_mature_clean_observations(
-        self,
-        current_time: datetime
-    ) -> Tuple[List[QuarantineObservation], List[QuarantineObservation]]:
-        mature_approved: List[QuarantineObservation] = []
-        rejected_suspicious: List[QuarantineObservation] = []
-        admission_cutoff = current_time - self.delay
-        while self.buffer and self.buffer[0].timestamp <= admission_cutoff:
+    def extract_mature_clean_observations(self, current_time):
+        approved, rejected = [], []
+        while self.buffer and self.buffer[0].timestamp + self.delay <= current_time:
             candidate = self.buffer.popleft()
-            if candidate.risk_score < self.h_quarantine:
-                mature_approved.append(candidate)
+            candidate.reason = "approved" if candidate.horizon_risk < 1.0 else "risk_in_quarantine_horizon"
+            (approved if candidate.reason == "approved" else rejected).append(candidate)
+            self.decisions.append(candidate)
+        return approved, rejected
+
+    def purge_suspicious_horizon(self, start_time):
+        preserved = deque()
+        removed = 0
+        for candidate in self.buffer:
+            if candidate.timestamp + self.delay >= start_time:
+                candidate.reason = "alert_horizon"
+                self.decisions.append(candidate)
+                removed += 1
             else:
-                rejected_suspicious.append(candidate)
+                preserved.append(candidate)
+        self.buffer = preserved
+        return removed
 
-        return mature_approved, rejected_suspicious
-
-    def purge_suspicious_horizon(self, start_time: datetime) -> int:
-        initial_len = len(self.buffer)
-        preserved_elements = [obs for obs in self.buffer if obs.timestamp < start_time]
-        self.buffer = deque(preserved_elements)
-        return initial_len - len(self.buffer)
-
-    def get_operational_snapshot(self) -> List[QuarantineObservation]:
+    def get_operational_snapshot(self):
         return list(self.buffer)
 
-    def __len__(self) -> int:
+    def __len__(self):
         return len(self.buffer)
